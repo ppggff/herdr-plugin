@@ -819,7 +819,8 @@ herdr plugin pane open --plugin local.input-method-keeper --entrypoint dashboard
 ```
 
 `bin/ime-keeper dashboard` is read-only. It refreshes in place once per second
-by default and can be run manually with `--once` for tests:
+by default, clears the current screen plus terminal scrollback on each live
+refresh, and can be run manually with `--once` for tests:
 
 ```sh
 bin/ime-keeper dashboard --once
@@ -832,7 +833,12 @@ The dashboard collects:
 - backend executable and backend-reported current input source
 - current session state file contents
 - live Herdr workspaces, tabs, and panes from Herdr CLI list commands
-- the recent tail of the current session's `focus.log`
+
+Rendered output should stay compact enough for one screen. Header details are
+limited to the current session, enabled/debug/action, default/current input
+source, backend name, and live/state pane counts. Workspace and tab labels give
+context, and panes render as only `pane-id=status`. Do not render focus log
+tails, cwd, agent, or update timestamps in the dashboard.
 
 It must not acquire `run.lock`, mutate config, repair broken files, clear state,
 or select an input source. Backend `current` and Herdr list failures should be

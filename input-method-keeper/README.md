@@ -135,14 +135,17 @@ herdr plugin pane focus <pane-id>
 herdr plugin pane close <pane-id>
 ```
 
-The dashboard refreshes in place and shows:
+The dashboard refreshes in place and keeps the output compact:
 
-- current session label and state key
-- enabled/debug/default action/backend/default input source
+- current session label
+- enabled/debug/default action/backend/default/current input source
 - current macOS input source reported by the backend
-- live Herdr workspaces, tabs, and panes
-- each pane's stored input source and live `custom_status`
-- current session `focus.log` path and recent tail
+- live Herdr workspaces and tabs
+- each pane as only `pane-id=status`
+
+It does not show the `focus.log` tail, pane cwd, agent, or update timestamps.
+The live dashboard clears the screen and terminal scrollback on each refresh so
+older, longer output does not remain visible.
 
 The dashboard pane is not special-cased by the plugin. It is handled like any
 other Herdr pane, so it can also get its own remembered input source.

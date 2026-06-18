@@ -496,7 +496,7 @@ class CliTests(TempEnvTest):
         self.assertFalse(store.debug_current_path.exists())
         self.assertEqual(list(store.session_dir.glob("debug.*.log")), [])
 
-    def test_dashboard_once_renders_config_live_panes_state_and_focus_log(self):
+    def test_dashboard_once_renders_compact_pane_status(self):
         self.write_config(
             debug=True,
             default_action="keep",
@@ -565,16 +565,17 @@ class CliTests(TempEnvTest):
 
         output = stdout.getvalue()
         self.assertEqual(code, 0)
-        self.assertIn("Input Method Keeper Dashboard", output)
-        self.assertIn("session=work", output)
-        self.assertIn("enabled=on debug=on action=keep backend=macism", output)
+        self.assertIn("IME Keeper", output)
+        self.assertIn("session=work enabled=on debug=on action=keep", output)
         self.assertIn("default=ABC current=pinyin", output)
-        self.assertIn("* workspace 1 repo w1 active=w1:t2", output)
-        self.assertIn("* tab 2 cn w1:t2", output)
-        self.assertIn("* p2   live       stored=pinyin", output)
-        self.assertIn("status=IME pinyin", output)
-        self.assertIn("p1   state-only stored=ABC", output)
-        self.assertIn("focus-tail-entry", output)
+        self.assertIn("backend=macism panes=live:1/state:2", output)
+        self.assertIn("* W1 repo", output)
+        self.assertIn("* T2 cn: *p2=IME pinyin", output)
+        self.assertIn("T1 en: p1=stored ABC", output)
+        self.assertNotIn("focus-tail-entry", output)
+        self.assertNotIn("focus.log tail", output)
+        self.assertNotIn("cwd=", output)
+        self.assertNotIn("agent=", output)
 
     def test_set_backend_helper_and_macism_write_backend_config(self):
         self.write_config()

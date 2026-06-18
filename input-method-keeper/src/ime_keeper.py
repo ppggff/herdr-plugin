@@ -12,10 +12,9 @@ import socket
 import subprocess
 import sys
 import time
-from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 
 VALID_ACTIONS = {"keep", "reset", "ignore"}
@@ -1715,42 +1714,6 @@ def display_bool(value: Any) -> str:
     return "on" if bool(value) else "off"
 
 
-def display_path(value: Optional[str], width: int = 56) -> str:
-    if not value:
-        return "-"
-    text = str(value)
-    home = str(Path.home())
-    if text.startswith(home + "/"):
-        text = "~" + text[len(home):]
-    if len(text) <= width:
-        return text
-    return "..." + text[-(width - 3):]
-
-
-def display_time(value: Optional[str]) -> str:
-    if not value:
-        return "-"
-    text = str(value)
-    try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
-        return parsed.astimezone().strftime("%m-%d %H:%M:%S")
-    except Exception:
-        return text[:19]
-
-
-def tail_lines(path: Path, count: int) -> List[str]:
-    try:
-        lines: Deque[str] = deque(maxlen=count)
-        with path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                lines.append(line.rstrip("\n"))
-        return list(lines)
-    except FileNotFoundError:
-        return []
-    except OSError as exc:
-        return [f"failed to read {path}: {exc}"]
-
-
 def tab_sort_key(tab_id: str, tab_by_id: Mapping[str, Mapping[str, Any]]) -> Tuple[int, str]:
     tab = tab_by_id.get(tab_id, {})
     number = tab.get("number")
@@ -1769,6 +1732,29 @@ def workspace_sort_key(
 def pane_sort_key(pane_id: str) -> Tuple[str, str]:
     local_pane_id, workspace_id = pane_parts(pane_id)
     return (workspace_id, local_pane_id)
+
+
+def dashboard_pane_status(
+    live: Optional[Mapping[str, Any]],
+    pane_state: Mapping[str, Any],
+) -> str:
+    live_status = live.get("custom_status") if isinstance(live, Mapping) else None
+    if live_status:
+        return str(live_status)
+    stored = pane_state.get("input_source_id")
+    if stored:
+        return f"stored {display_source(stored)}"
+    return "-"
+
+
+def dashboard_pane_token(
+    pane_id: str,
+    live: Optional[Mapping[str, Any]],
+    pane_state: Mapping[str, Any],
+) -> str:
+    local_pane_id, _workspace_id = pane_parts(pane_id)
+    marker = "*" if isinstance(live, Mapping) and live.get("focused") else ""
+    return f"{marker}{local_pane_id}={dashboard_pane_status(live, pane_state)}"
 
 
 def collect_dashboard_data(
@@ -1834,7 +1820,6 @@ def render_dashboard(data: Mapping[str, Any]) -> str:
     config = data.get("config") if isinstance(data.get("config"), dict) else {}
     state = data.get("state") if isinstance(data.get("state"), dict) else None
     identity = data.get("identity")
-    store = data.get("store")
     backend = data.get("backend") if isinstance(data.get("backend"), dict) else {}
     diagnostics = data.get("diagnostics") if isinstance(data.get("diagnostics"), list) else []
     workspaces = data.get("workspaces") if isinstance(data.get("workspaces"), list) else []
@@ -1880,36 +1865,28 @@ def render_dashboard(data: Mapping[str, Any]) -> str:
         tab_ids_by_workspace.setdefault(workspace_id, set()).add(tab_id)
         pane_ids_by_tab.setdefault(tab_id, set()).add(str(pane_id))
 
-    now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    now = datetime.now().astimezone().strftime("%H:%M:%S")
     session_label = getattr(identity, "label", "-")
-    session_key = getattr(identity, "key", "-")
-    focus_log_path = str(getattr(store, "focus_log_path", "-"))
+    live_count = len(panes)
+    state_count = len(state_panes)
     lines = [
-        f"Input Method Keeper Dashboard  {now}",
         (
-            f"session={session_label} key={session_key} "
-            f"state_panes={len(state_panes)} live_panes={len(panes)}"
-        ),
-        (
+            f"IME Keeper {now} "
+            f"session={session_label} "
             f"enabled={display_bool(config.get('enabled'))} "
             f"debug={display_bool(config.get('debug'))} "
-            f"action={config.get('default_action', '-')} "
-            f"backend={backend.get('name') or '-'}"
+            f"action={config.get('default_action', '-')}"
         ),
         (
             f"default={display_source(config.get('default_input_source'))} "
             f"current={display_source(data.get('current_input_source'))} "
-            f"notify={display_bool(config.get('notify_on_focus'))} "
-            f"pane_status={display_bool(config.get('pane_status_on_focus'))} "
-            f"focus_log={display_bool(config.get('focus_log'))}"
+            f"backend={backend.get('name') or '-'} "
+            f"panes=live:{live_count}/state:{state_count}"
         ),
-        f"backend_exe={display_path(backend.get('executable'), width=92)}",
-        f"focus_log_path={focus_log_path}",
     ]
     if diagnostics:
         lines.append("diagnostics=" + " | ".join(str(item) for item in diagnostics))
     lines.append("")
-    lines.append("Workspaces")
 
     if not workspace_ids:
         lines.append("  (no live or stored panes)")
@@ -1919,61 +1896,27 @@ def render_dashboard(data: Mapping[str, Any]) -> str:
         workspace_marker = "*" if workspace.get("focused") else " "
         workspace_number = workspace.get("number", "-")
         active_tab_id = workspace.get("active_tab_id", "-")
-        lines.append(
-            (
-                f"{workspace_marker} workspace {workspace_number} "
-                f"{workspace_label} {workspace_id} active={active_tab_id}"
-            )
-        )
+        lines.append(f"{workspace_marker} W{workspace_number} {workspace_label}")
         tab_ids = tab_ids_by_workspace.get(workspace_id, set())
         if not tab_ids:
-            lines.append("    (no tabs)")
+            lines.append("    (no panes)")
             continue
         for tab_id in sorted(tab_ids, key=lambda item: tab_sort_key(item, tab_by_id)):
             tab = tab_by_id.get(tab_id, {})
             tab_marker = "*" if tab.get("focused") or active_tab_id == tab_id else " "
             tab_label = tab.get("label") or tab_id.rsplit(":", 1)[-1]
             tab_number = tab.get("number", "-")
-            lines.append(f"  {tab_marker} tab {tab_number} {tab_label} {tab_id}")
             pane_ids = pane_ids_by_tab.get(tab_id, set())
             if not pane_ids:
-                lines.append("      (no panes)")
                 continue
+            pane_tokens: List[str] = []
             for pane_id in sorted(pane_ids, key=pane_sort_key):
                 live = pane_by_id.get(pane_id)
                 pane_state = state_panes.get(pane_id)
-                if not isinstance(pane_state, dict):
+                if not isinstance(pane_state, Mapping):
                     pane_state = {}
-                marker = "*" if isinstance(live, dict) and live.get("focused") else " "
-                local_pane_id, _workspace = pane_parts(pane_id)
-                live_status = live.get("custom_status") if isinstance(live, dict) else None
-                agent = live.get("agent") if isinstance(live, dict) else pane_state.get("agent")
-                agent_status = live.get("agent_status") if isinstance(live, dict) else None
-                cwd = live.get("foreground_cwd") if isinstance(live, dict) else None
-                if not cwd:
-                    cwd = live.get("cwd") if isinstance(live, dict) else pane_state.get("cwd")
-                live_flag = "live" if isinstance(live, dict) else "state-only"
-                lines.append(
-                    (
-                        f"    {marker} {local_pane_id:<4} {live_flag:<10} "
-                        f"stored={display_source(pane_state.get('input_source_id')):<8} "
-                        f"status={live_status or '-':<12} "
-                        f"agent={(agent or '-')}/{agent_status or '-'} "
-                        f"updated={display_time(pane_state.get('updated_at'))} "
-                        f"cwd={display_path(cwd, width=52)}"
-                    )
-                )
-
-    if isinstance(store, StateStore):
-        focus_tail = tail_lines(store.focus_log_path, 5)
-        lines.append("")
-        lines.append("focus.log tail")
-        if focus_tail:
-            lines.extend(f"  {line}" for line in focus_tail)
-        else:
-            lines.append("  (empty)")
-    lines.append("")
-    lines.append("Ctrl-C closes this dashboard pane. It is read-only.")
+                pane_tokens.append(dashboard_pane_token(pane_id, live, pane_state))
+            lines.append(f"  {tab_marker} T{tab_number} {tab_label}: " + ", ".join(pane_tokens))
     return "\n".join(lines)
 
 
@@ -1991,7 +1934,7 @@ def run_dashboard(
         if once:
             print(output)
             return 0
-        print("\033[2J\033[H" + output, flush=True)
+        print("\033[3J\033[2J\033[H" + output, flush=True)
         time.sleep(max(0.2, interval_seconds))
 
 
