@@ -147,6 +147,22 @@ It does not show the `focus.log` tail, pane cwd, agent, or update timestamps.
 The live dashboard clears the screen and terminal scrollback on each refresh so
 older, longer output does not remain visible.
 
+The dashboard uses ANSI colors when stdout is a TTY. `NO_COLOR` disables color.
+For manual checks:
+
+```sh
+input-method-keeper/bin/ime-keeper dashboard --once --color always
+input-method-keeper/bin/ime-keeper dashboard --once --color never
+```
+
+`>` marks the focused workspace, active tab, or focused pane. Tab rows use
+`tab <number> [<label>]`, for example:
+
+```text
+> ws 5 hatch-deck
+  > tab 4 [4]: >p6=IME ABC, p1=stored pinyin
+```
+
 The dashboard pane is not special-cased by the plugin. It is handled like any
 other Herdr pane, so it can also get its own remembered input source.
 

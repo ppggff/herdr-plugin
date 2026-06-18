@@ -1714,6 +1714,59 @@ def display_bool(value: Any) -> str:
     return "on" if bool(value) else "off"
 
 
+class DashboardStyle:
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+
+    def _wrap(self, text: str, code: str) -> str:
+        if not self.enabled:
+            return text
+        return f"\033[{code}m{text}\033[0m"
+
+    def title(self, text: str) -> str:
+        return self._wrap(text, "1;36")
+
+    def key(self, text: str) -> str:
+        return self._wrap(text, "2")
+
+    def ok(self, text: str) -> str:
+        return self._wrap(text, "32")
+
+    def warn(self, text: str) -> str:
+        return self._wrap(text, "33")
+
+    def accent(self, text: str) -> str:
+        return self._wrap(text, "36")
+
+    def stored(self, text: str) -> str:
+        return self._wrap(text, "2;33")
+
+    def focused(self, text: str) -> str:
+        return self._wrap(text, "1;7")
+
+    def live(self, text: str) -> str:
+        return self._wrap(text, "32")
+
+    def muted(self, text: str) -> str:
+        return self._wrap(text, "2")
+
+
+def dashboard_color_enabled(env: Mapping[str, str], mode: str) -> bool:
+    if mode == "always":
+        return True
+    if mode == "never":
+        return False
+    if env.get("NO_COLOR"):
+        return False
+    if env.get("TERM") == "dumb":
+        return False
+    return sys.stdout.isatty()
+
+
+def dashboard_setting(label: str, value: str, style: DashboardStyle) -> str:
+    return f"{style.key(label)}={value}"
+
+
 def tab_sort_key(tab_id: str, tab_by_id: Mapping[str, Mapping[str, Any]]) -> Tuple[int, str]:
     tab = tab_by_id.get(tab_id, {})
     number = tab.get("number")
@@ -1737,24 +1790,28 @@ def pane_sort_key(pane_id: str) -> Tuple[str, str]:
 def dashboard_pane_status(
     live: Optional[Mapping[str, Any]],
     pane_state: Mapping[str, Any],
+    style: DashboardStyle,
 ) -> str:
     live_status = live.get("custom_status") if isinstance(live, Mapping) else None
     if live_status:
-        return str(live_status)
+        return style.live(str(live_status))
     stored = pane_state.get("input_source_id")
     if stored:
-        return f"stored {display_source(stored)}"
-    return "-"
+        return style.stored(f"stored {display_source(stored)}")
+    return style.muted("-")
 
 
 def dashboard_pane_token(
     pane_id: str,
     live: Optional[Mapping[str, Any]],
     pane_state: Mapping[str, Any],
+    style: DashboardStyle,
 ) -> str:
     local_pane_id, _workspace_id = pane_parts(pane_id)
-    marker = "*" if isinstance(live, Mapping) and live.get("focused") else ""
-    return f"{marker}{local_pane_id}={dashboard_pane_status(live, pane_state)}"
+    text = f"{local_pane_id}={dashboard_pane_status(live, pane_state, style)}"
+    if isinstance(live, Mapping) and live.get("focused"):
+        return style.focused(f">{text}")
+    return text
 
 
 def collect_dashboard_data(
@@ -1816,7 +1873,8 @@ def collect_dashboard_data(
     }
 
 
-def render_dashboard(data: Mapping[str, Any]) -> str:
+def render_dashboard(data: Mapping[str, Any], color_enabled: bool = False) -> str:
+    style = DashboardStyle(color_enabled)
     config = data.get("config") if isinstance(data.get("config"), dict) else {}
     state = data.get("state") if isinstance(data.get("state"), dict) else None
     identity = data.get("identity")
@@ -1869,19 +1927,23 @@ def render_dashboard(data: Mapping[str, Any]) -> str:
     session_label = getattr(identity, "label", "-")
     live_count = len(panes)
     state_count = len(state_panes)
+    enabled_value = (
+        style.ok("on") if bool(config.get("enabled")) else style.warn("off")
+    )
+    debug_value = style.warn("on") if bool(config.get("debug")) else style.muted("off")
     lines = [
         (
-            f"IME Keeper {now} "
-            f"session={session_label} "
-            f"enabled={display_bool(config.get('enabled'))} "
-            f"debug={display_bool(config.get('debug'))} "
-            f"action={config.get('default_action', '-')}"
+            f"{style.title('IME Keeper')} {style.muted(now)} "
+            f"{dashboard_setting('session', session_label, style)} "
+            f"{dashboard_setting('enabled', enabled_value, style)} "
+            f"{dashboard_setting('debug', debug_value, style)} "
+            f"{dashboard_setting('action', str(config.get('default_action', '-')), style)}"
         ),
         (
-            f"default={display_source(config.get('default_input_source'))} "
-            f"current={display_source(data.get('current_input_source'))} "
-            f"backend={backend.get('name') or '-'} "
-            f"panes=live:{live_count}/state:{state_count}"
+            f"{dashboard_setting('default', style.accent(display_source(config.get('default_input_source'))), style)} "
+            f"{dashboard_setting('current', style.accent(display_source(data.get('current_input_source'))), style)} "
+            f"{dashboard_setting('backend', str(backend.get('name') or '-'), style)} "
+            f"{dashboard_setting('panes', f'live:{live_count}/state:{state_count}', style)}"
         ),
     ]
     if diagnostics:
@@ -1893,17 +1955,19 @@ def render_dashboard(data: Mapping[str, Any]) -> str:
     for workspace_id in sorted(workspace_ids, key=lambda item: workspace_sort_key(item, workspace_by_id)):
         workspace = workspace_by_id.get(workspace_id, {})
         workspace_label = workspace.get("label") or workspace_id
-        workspace_marker = "*" if workspace.get("focused") else " "
+        workspace_marker = ">" if workspace.get("focused") else " "
         workspace_number = workspace.get("number", "-")
         active_tab_id = workspace.get("active_tab_id", "-")
-        lines.append(f"{workspace_marker} W{workspace_number} {workspace_label}")
+        workspace_line = f"{workspace_marker} ws {workspace_number} {workspace_label}"
+        lines.append(style.focused(workspace_line) if workspace.get("focused") else workspace_line)
         tab_ids = tab_ids_by_workspace.get(workspace_id, set())
         if not tab_ids:
             lines.append("    (no panes)")
             continue
         for tab_id in sorted(tab_ids, key=lambda item: tab_sort_key(item, tab_by_id)):
             tab = tab_by_id.get(tab_id, {})
-            tab_marker = "*" if tab.get("focused") or active_tab_id == tab_id else " "
+            tab_focused = bool(tab.get("focused") or active_tab_id == tab_id)
+            tab_marker = ">" if tab_focused else " "
             tab_label = tab.get("label") or tab_id.rsplit(":", 1)[-1]
             tab_number = tab.get("number", "-")
             pane_ids = pane_ids_by_tab.get(tab_id, set())
@@ -1915,8 +1979,11 @@ def render_dashboard(data: Mapping[str, Any]) -> str:
                 pane_state = state_panes.get(pane_id)
                 if not isinstance(pane_state, Mapping):
                     pane_state = {}
-                pane_tokens.append(dashboard_pane_token(pane_id, live, pane_state))
-            lines.append(f"  {tab_marker} T{tab_number} {tab_label}: " + ", ".join(pane_tokens))
+                pane_tokens.append(dashboard_pane_token(pane_id, live, pane_state, style))
+            tab_head = f"  {tab_marker} tab {tab_number} [{tab_label}]: "
+            if tab_focused:
+                tab_head = style.focused(tab_head)
+            lines.append(tab_head + ", ".join(pane_tokens))
     return "\n".join(lines)
 
 
@@ -1926,11 +1993,13 @@ def run_dashboard(
     herdr: Optional[Any] = None,
     interval_seconds: float = 1.0,
     once: bool = False,
+    color_mode: str = "auto",
 ) -> int:
     herdr = herdr if herdr is not None else HerdrClient(env)
+    color_enabled = dashboard_color_enabled(env, color_mode)
     while True:
         data = collect_dashboard_data(env, backend, herdr)
-        output = render_dashboard(data)
+        output = render_dashboard(data, color_enabled=color_enabled)
         if once:
             print(output)
             return 0
@@ -2145,6 +2214,7 @@ def main(
     if command == "dashboard":
         once = False
         interval_seconds = 1.0
+        color_mode = "auto"
         index = 1
         while index < len(argv):
             if argv[index] == "--once":
@@ -2160,6 +2230,18 @@ def main(
                     print("dashboard interval must be a number", file=sys.stderr)
                     return 2
                 index += 2
+            elif argv[index] == "--color":
+                if index + 1 >= len(argv):
+                    print(
+                        "usage: ime-keeper dashboard [--once] [--interval seconds] [--color auto|always|never]",
+                        file=sys.stderr,
+                    )
+                    return 2
+                color_mode = argv[index + 1]
+                if color_mode not in {"auto", "always", "never"}:
+                    print("dashboard color must be auto, always, or never", file=sys.stderr)
+                    return 2
+                index += 2
             else:
                 print(f"unknown dashboard option: {argv[index]}", file=sys.stderr)
                 return 2
@@ -2169,6 +2251,7 @@ def main(
             herdr=herdr,
             interval_seconds=interval_seconds,
             once=once,
+            color_mode=color_mode,
         )
     if command == "doctor":
         flags = set(argv[1:])

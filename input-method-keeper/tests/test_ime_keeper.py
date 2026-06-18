@@ -569,13 +569,26 @@ class CliTests(TempEnvTest):
         self.assertIn("session=work enabled=on debug=on action=keep", output)
         self.assertIn("default=ABC current=pinyin", output)
         self.assertIn("backend=macism panes=live:1/state:2", output)
-        self.assertIn("* W1 repo", output)
-        self.assertIn("* T2 cn: *p2=IME pinyin", output)
-        self.assertIn("T1 en: p1=stored ABC", output)
+        self.assertIn("> ws 1 repo", output)
+        self.assertIn("> tab 2 [cn]: >p2=IME pinyin", output)
+        self.assertIn("tab 1 [en]: p1=stored ABC", output)
         self.assertNotIn("focus-tail-entry", output)
         self.assertNotIn("focus.log tail", output)
         self.assertNotIn("cwd=", output)
         self.assertNotIn("agent=", output)
+        self.assertNotIn("\033[", output)
+
+        color_stdout = io.StringIO()
+        with contextlib.redirect_stdout(color_stdout):
+            code = ime_keeper.main(
+                ["dashboard", "--once", "--color", "always"],
+                env=self.env,
+                backend=FakeBackend(["com.tencent.inputmethod.wetype.pinyin"]),
+                herdr=herdr,
+            )
+
+        self.assertEqual(code, 0)
+        self.assertIn("\033[", color_stdout.getvalue())
 
     def test_set_backend_helper_and_macism_write_backend_config(self):
         self.write_config()
