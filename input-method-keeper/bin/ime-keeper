@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+
+try_python() {
+  candidate=$1
+  shift
+  if [ -z "$candidate" ]; then
+    return 1
+  fi
+  if "$candidate" -c 'import sys, json; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
+    exec "$candidate" "$ROOT_DIR/src/ime_keeper.py" "$@"
+  fi
+  return 1
+}
+
+attempts=""
+for candidate in "${HERDR_IME_KEEPER_PYTHON:-}" /opt/homebrew/bin/python3 /usr/local/bin/python3 python3; do
+  attempts="${attempts}${attempts:+, }${candidate:-<empty>}"
+  try_python "$candidate" "$@" || continue
+done
+
+printf '%s\n' "input-method-keeper: no usable Python 3.9+ found; tried: $attempts" >&2
+printf '%s\n' "Install Python with: brew install python" >&2
+exit 127

@@ -1,0 +1,76 @@
+id = "local.input-method-keeper"
+name = "Input Method Keeper"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "Keep macOS input sources stable per Herdr pane."
+platforms = ["macos"]
+
+[[actions]]
+id = "toggle-enabled"
+title = "Toggle input method keeper"
+command = ["bin/ime-keeper", "toggle-enabled"]
+
+[[actions]]
+id = "status"
+title = "Show input method keeper status"
+command = ["bin/ime-keeper", "status"]
+
+[[actions]]
+id = "set-default-input-source"
+title = "Set default input source"
+command = ["bin/ime-keeper", "set-default-input-source"]
+
+[[actions]]
+id = "set-default-action-keep"
+title = "Use default input method action: keep"
+command = ["bin/ime-keeper", "set-default-action", "keep"]
+
+[[actions]]
+id = "set-default-action-reset"
+title = "Use default input method action: reset"
+command = ["bin/ime-keeper", "set-default-action", "reset"]
+
+[[actions]]
+id = "set-default-action-ignore"
+title = "Use default input method action: ignore"
+command = ["bin/ime-keeper", "set-default-action", "ignore"]
+
+[[actions]]
+id = "debug-on"
+title = "Enable input method keeper debug logging"
+command = ["bin/ime-keeper", "debug-on"]
+
+[[actions]]
+id = "debug-off"
+title = "Disable input method keeper debug logging"
+command = ["bin/ime-keeper", "debug-off"]
+
+[[actions]]
+id = "doctor"
+title = "Diagnose input method keeper"
+command = ["bin/ime-keeper", "doctor"]
+
+[[actions]]
+id = "doctor-gc-all"
+title = "Diagnose and clean old input method keeper state"
+command = ["bin/ime-keeper", "doctor", "--gc-all"]
+
+[[events]]
+on = "pane.focused"
+command = ["bin/ime-keeper", "event", "pane-focused"]
+
+[[events]]
+on = "pane.closed"
+command = ["bin/ime-keeper", "event", "pane-closed"]
+
+[[events]]
+on = "tab.closed"
+command = ["bin/ime-keeper", "event", "tab-closed"]
+
+[[events]]
+on = "pane.moved"
+command = ["bin/ime-keeper", "event", "pane-moved"]
+
+[[events]]
+on = "workspace.closed"
+command = ["bin/ime-keeper", "event", "workspace-closed"]
