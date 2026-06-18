@@ -145,7 +145,8 @@ The dashboard refreshes in place and keeps the output compact:
 
 It does not show the `focus.log` tail, pane cwd, agent, or update timestamps.
 The live dashboard clears the screen and terminal scrollback on each refresh so
-older, longer output does not remain visible.
+older, longer output does not remain visible. A muted `Ctrl-C to exit` hint is
+shown at the bottom.
 
 The dashboard uses ANSI colors when stdout is a TTY. `NO_COLOR` disables color.
 For manual checks:

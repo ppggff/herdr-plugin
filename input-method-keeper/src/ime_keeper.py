@@ -1983,6 +1983,8 @@ def render_dashboard(data: Mapping[str, Any], color_enabled: bool = False) -> st
             tab_label_text = dashboard_paren_label(tab_label)
             tab_head = f"  {tab_marker} tab {tab_number} {tab_label_text}: "
             lines.append(tab_head + ", ".join(pane_tokens))
+    lines.append("")
+    lines.append(style.muted("Ctrl-C to exit"))
     return "\n".join(lines)
 
 

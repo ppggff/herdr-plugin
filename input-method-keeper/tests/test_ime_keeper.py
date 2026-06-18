@@ -572,6 +572,7 @@ class CliTests(TempEnvTest):
         self.assertIn("> workspace 1 (repo)", output)
         self.assertIn("> tab 2 (cn): >[p2]=IME pinyin", output)
         self.assertIn("tab 1 (en): p1=stored ABC", output)
+        self.assertIn("Ctrl-C to exit", output)
         self.assertNotIn("focus-tail-entry", output)
         self.assertNotIn("focus.log tail", output)
         self.assertNotIn("cwd=", output)
@@ -598,6 +599,7 @@ class CliTests(TempEnvTest):
             color_output,
         )
         self.assertIn("p1=\033[2mstored ABC\033[0m", color_output)
+        self.assertIn("\033[2mCtrl-C to exit\033[0m", color_output)
 
     def test_set_backend_helper_and_macism_write_backend_config(self):
         self.write_config()

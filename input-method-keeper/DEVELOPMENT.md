@@ -846,7 +846,8 @@ plain text even in color mode. In color mode, only the focused marker is colored
 for workspace and tab; the focused pane id uses square brackets with the same
 color as the marker. Stored state uses the muted timestamp color. Do not use
 ANSI background or inverse-video styles. Do not render focus log tails, cwd,
-agent, or update timestamps in the dashboard.
+agent, or update timestamps in the dashboard. Keep the muted `Ctrl-C to exit`
+hint at the bottom.
 
 Color is ANSI-only and dependency-free. `--color auto` is the default: enable
 color when stdout is a TTY, disable it for pipes/tests, disable it when
