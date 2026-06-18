@@ -181,12 +181,26 @@ class DebugLoggingTests(TempEnvTest):
     def test_debug_log_rotation_threshold_is_100mb(self):
         self.assertEqual(ime_keeper.DEBUG_LOG_MAX_BYTES, 100 * 1024 * 1024)
 
-    def test_debug_log_rotation_uses_timestamped_filename(self):
+    def test_debug_log_uses_timestamped_current_filename(self):
+        self.write_config(debug=True)
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+
+        ime_keeper.log_debug(store, context.config, {"event": "test"})
+
+        current_name = store.debug_current_path.read_text(encoding="utf-8").strip()
+        self.assertRegex(current_name, r"^debug\.\d{8}T\d{12}Z\.log$")
+        self.assertTrue((store.session_dir / current_name).exists())
+        self.assertFalse((store.session_dir / "debug.log").exists())
+
+    def test_debug_log_rotation_switches_current_timestamped_file(self):
         self.write_config(debug=True)
         context = ime_keeper.HerdrContext.from_env(self.env)
         store = ime_keeper.StateStore(self.state_dir, context.identity)
         store.session_dir.mkdir(parents=True)
-        store.debug_path.write_text("old log line\n", encoding="utf-8")
+        old_path = store.session_dir / "debug.20260618T010203000001Z.log"
+        old_path.write_text("old log line\n", encoding="utf-8")
+        store.debug_current_path.write_text(old_path.name + "\n", encoding="utf-8")
         original_limit = ime_keeper.DEBUG_LOG_MAX_BYTES
 
         try:
@@ -196,10 +210,29 @@ class DebugLoggingTests(TempEnvTest):
             ime_keeper.DEBUG_LOG_MAX_BYTES = original_limit
 
         rotated = list(store.session_dir.glob("debug.*.log"))
-        self.assertEqual(len(rotated), 1)
-        self.assertRegex(rotated[0].name, r"^debug\.\d{8}T\d{12}Z\.log$")
-        self.assertEqual(rotated[0].read_text(encoding="utf-8"), "old log line\n")
+        self.assertEqual(len(rotated), 2)
+        current_name = store.debug_current_path.read_text(encoding="utf-8").strip()
+        self.assertRegex(current_name, r"^debug\.\d{8}T\d{12}Z\.log$")
+        self.assertNotEqual(current_name, old_path.name)
+        self.assertEqual(old_path.read_text(encoding="utf-8"), "old log line\n")
         self.assertFalse((store.session_dir / "debug.log.1").exists())
+
+    def test_debug_log_migrates_legacy_debug_log_to_timestamped_file(self):
+        self.write_config(debug=True)
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        store.session_dir.mkdir(parents=True)
+        store.debug_path.write_text("legacy log line\n", encoding="utf-8")
+
+        ime_keeper.log_debug(store, context.config, {"event": "test"})
+
+        current_name = store.debug_current_path.read_text(encoding="utf-8").strip()
+        log_path = store.session_dir / current_name
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        self.assertRegex(current_name, r"^debug\.\d{8}T\d{12}Z\.log$")
+        self.assertEqual(lines[0], "legacy log line")
+        self.assertEqual(json.loads(lines[-1])["event"], "test")
+        self.assertFalse(store.debug_path.exists())
 
 
 class EventParsingTests(unittest.TestCase):
@@ -344,7 +377,9 @@ class EventHandlerTests(TempEnvTest):
             debounce_seconds=0,
         )
 
-        log_entry = json.loads(store.debug_path.read_text(encoding="utf-8").splitlines()[-1])
+        current_name = store.debug_current_path.read_text(encoding="utf-8").strip()
+        log_path = store.session_dir / current_name
+        log_entry = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
         self.assertEqual(log_entry["event"], "pane-focused")
         self.assertEqual(log_entry["mode"], "keep")
         self.assertEqual(log_entry["pane_id"], "w1:p2")
@@ -380,6 +415,8 @@ class CliTests(TempEnvTest):
 
         self.assertEqual(code, 0)
         self.assertFalse(store.debug_path.exists())
+        self.assertFalse(store.debug_current_path.exists())
+        self.assertEqual(list(store.session_dir.glob("debug.*.log")), [])
 
     def test_doctor_does_not_select_by_default(self):
         self.write_config()

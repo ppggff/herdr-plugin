@@ -307,7 +307,8 @@ Recommended layout:
 sessions/<session-key>/state.json
 sessions/<session-key>/focus.lock
 sessions/<session-key>/focus.dirty
-sessions/<session-key>/debug.log
+sessions/<session-key>/debug.current
+sessions/<session-key>/debug.<UTC timestamp>.log
 ```
 
 State shape:
@@ -390,7 +391,7 @@ State clearing rules:
 
 - Clearing state means deleting `state.json` or replacing it with an empty v1
   state for the current session. It should also delete `focus.dirty` for that
-  session. It should not delete `debug.log`.
+  session. It should not delete `debug.current` or timestamped debug logs.
 - Enabling or disabling the plugin clears the current Herdr session's state. This
   prevents stale pane memories from being restored after the plugin has been
   paused or re-enabled. After disabling, event hooks perform no state operations
@@ -858,10 +859,10 @@ When debug is enabled, each event/action should log:
 - skip/failure reason
 - cleanup or pane-move details when applicable
 
-Debug logs must avoid unbounded growth. Version 1 can rotate by size, for
-example keep `debug.log` below 100 MB and rename the previous file to
-`debug.<UTC timestamp>.log`, for example
-`debug.20260618T103000123456Z.log`.
+Debug logs must avoid unbounded growth. Version 1 writes directly to a
+timestamped active file such as `debug.20260618T103000123456Z.log`.
+`debug.current` stores the active filename. When the active file grows past
+100 MB, create a new timestamped file and update `debug.current`.
 
 ## Manual Smoke Tests
 

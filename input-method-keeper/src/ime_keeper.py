@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 VALID_ACTIONS = {"keep", "reset", "ignore"}
 DEBUG_LOG_MAX_BYTES = 100 * 1024 * 1024
+DEBUG_LOG_NAME_RE = re.compile(r"^debug\.\d{8}T\d{12}Z\.log$")
 DEFAULT_CONFIG: Dict[str, Any] = {
     "enabled": True,
     "debug": False,
@@ -201,6 +202,7 @@ class StateStore:
         self.state_path = self.session_dir / "state.json"
         self.dirty_path = self.session_dir / "focus.dirty"
         self.debug_path = self.session_dir / "debug.log"
+        self.debug_current_path = self.session_dir / "debug.current"
         self.focus_lock_path = self.session_dir / "focus.lock"
 
     def load(self, readonly: bool = True) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -541,13 +543,49 @@ def reconcile_state_policy(config: Mapping[str, Any], store: StateStore, cause: 
     return "keep"
 
 
+def timestamped_debug_log_path(store: StateStore) -> Path:
+    return store.session_dir / f"debug.{timestamp_for_filename()}.log"
+
+
+def read_current_debug_log_path(store: StateStore) -> Optional[Path]:
+    try:
+        name = store.debug_current_path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return None
+    if not DEBUG_LOG_NAME_RE.fullmatch(name):
+        return None
+    return store.session_dir / name
+
+
+def write_current_debug_log_path(store: StateStore, path: Path) -> None:
+    atomic_write_text(store.debug_current_path, path.name + "\n")
+
+
+def migrate_legacy_debug_log(store: StateStore) -> Optional[Path]:
+    if not store.debug_path.exists():
+        return None
+    target = timestamped_debug_log_path(store)
+    store.debug_path.rename(target)
+    return target
+
+
+def resolve_debug_log_path(store: StateStore) -> Path:
+    store.session_dir.mkdir(parents=True, exist_ok=True)
+    migrated_path = migrate_legacy_debug_log(store)
+    current_path = read_current_debug_log_path(store)
+    if current_path is None:
+        current_path = migrated_path or timestamped_debug_log_path(store)
+        write_current_debug_log_path(store, current_path)
+    if current_path.exists() and current_path.stat().st_size > DEBUG_LOG_MAX_BYTES:
+        current_path = timestamped_debug_log_path(store)
+        write_current_debug_log_path(store, current_path)
+    return current_path
+
+
 def log_debug(store: StateStore, config: Mapping[str, Any], message: Mapping[str, Any]) -> None:
     if not bool(config.get("debug", False)):
         return
-    store.session_dir.mkdir(parents=True, exist_ok=True)
-    if store.debug_path.exists() and store.debug_path.stat().st_size > DEBUG_LOG_MAX_BYTES:
-        rotated_path = store.debug_path.with_name(f"debug.{timestamp_for_filename()}.log")
-        store.debug_path.rename(rotated_path)
+    debug_path = resolve_debug_log_path(store)
     line = json.dumps(
         {
             "timestamp": utc_now(),
@@ -557,7 +595,7 @@ def log_debug(store: StateStore, config: Mapping[str, Any], message: Mapping[str
         },
         ensure_ascii=False,
     )
-    with store.debug_path.open("a", encoding="utf-8") as handle:
+    with debug_path.open("a", encoding="utf-8") as handle:
         handle.write(line + "\n")
 
 

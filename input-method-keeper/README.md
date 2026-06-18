@@ -216,8 +216,10 @@ Run the `Diagnose input method keeper` action first. It reports:
 Turn on debug logs with `Enable input method keeper debug logging`, reproduce
 the issue, then run `Show input method keeper status`. For a first multi-day
 trial, keeping debug enabled is recommended. It appends JSON lines to the
-current session's `debug.log` and rotates at 100 MB to timestamped files such
-as `debug.20260618T103000123456Z.log`.
+current session's active `debug.<UTC timestamp>.log` file, for example
+`debug.20260618T103000123456Z.log`. The small `debug.current` file contains
+the active log filename. When the active log grows past 100 MB, the plugin
+starts a new timestamped log and updates `debug.current`.
 
 Focus debug entries include the decision context needed to diagnose most
 issues:
