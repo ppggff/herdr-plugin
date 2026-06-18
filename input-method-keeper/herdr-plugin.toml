@@ -5,6 +5,12 @@ min_herdr_version = "0.7.0"
 description = "Keep macOS input sources stable per Herdr pane."
 platforms = ["macos"]
 
+[[panes]]
+id = "dashboard"
+title = "Input method keeper dashboard"
+placement = "split"
+command = ["sh", "bin/ime-keeper", "dashboard"]
+
 [[actions]]
 id = "toggle-enabled"
 title = "Toggle input method keeper"
@@ -44,6 +50,16 @@ command = ["bin/ime-keeper", "debug-on"]
 id = "debug-off"
 title = "Disable input method keeper debug logging"
 command = ["bin/ime-keeper", "debug-off"]
+
+[[actions]]
+id = "set-backend-helper"
+title = "Use Swift input method helper"
+command = ["bin/ime-keeper", "set-backend-helper"]
+
+[[actions]]
+id = "set-backend-macism"
+title = "Use macism input method backend"
+command = ["bin/ime-keeper", "set-backend-macism"]
 
 [[actions]]
 id = "doctor"

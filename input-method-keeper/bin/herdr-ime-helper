@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+SRC="$ROOT_DIR/helpers/herdr-ime-helper.swift"
+
+if [ -n "${HERDR_IME_HELPER_BIN:-}" ]; then
+  exec "$HERDR_IME_HELPER_BIN" "$@"
+fi
+
+SWIFTC="${HERDR_IME_HELPER_SWIFTC:-}"
+if [ -z "$SWIFTC" ]; then
+  SWIFTC=$(command -v swiftc || true)
+fi
+if [ -z "$SWIFTC" ]; then
+  printf '%s\n' "herdr-ime-helper: swiftc not found" >&2
+  exit 127
+fi
+
+if [ -n "${HERDR_PLUGIN_STATE_DIR:-}" ]; then
+  BUILD_DIR="$HERDR_PLUGIN_STATE_DIR/helper-build"
+else
+  BUILD_DIR="${TMPDIR:-/tmp}/herdr-ime-helper-${USER:-user}"
+fi
+BIN="$BUILD_DIR/herdr-ime-helper"
+
+mkdir -p "$BUILD_DIR"
+
+if [ ! -x "$BIN" ] || [ "$SRC" -nt "$BIN" ]; then
+  MODULE_CACHE="$BUILD_DIR/module-cache"
+  mkdir -p "$MODULE_CACHE"
+  CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" "$SWIFTC" "$SRC" -o "$BIN"
+fi
+
+exec "$BIN" "$@"

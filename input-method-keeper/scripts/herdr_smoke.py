@@ -679,6 +679,9 @@ def fake_backend_config(backend_path: Path, source_path: Path, default_source: s
         "session_name": "auto",
         "default_action": "keep",
         "default_input_source": default_source,
+        "notify_on_focus": False,
+        "pane_status_on_focus": False,
+        "focus_log": False,
         "backend": {
             "name": "fake-smoke",
             "executable_candidates": [str(backend_path)],

@@ -12,9 +12,10 @@ import socket
 import subprocess
 import sys
 import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Deque, Dict, List, Mapping, Optional, Tuple
 
 
 VALID_ACTIONS = {"keep", "reset", "ignore"}
@@ -26,6 +27,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "session_name": "auto",
     "default_action": "keep",
     "default_input_source": "com.apple.keylayout.ABC",
+    "notify_on_focus": True,
+    "pane_status_on_focus": True,
+    "focus_log": True,
+    "status_ttl_ms": 600000,
     "backend": {
         "name": "macism",
         "executable_candidates": [
@@ -62,8 +67,29 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def local_now_for_log() -> str:
+    return datetime.now().astimezone().isoformat(timespec="milliseconds")
+
+
 def default_config() -> Dict[str, Any]:
     return json.loads(json.dumps(DEFAULT_CONFIG))
+
+
+def plugin_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def macism_backend_config() -> Dict[str, Any]:
+    return json.loads(json.dumps(DEFAULT_CONFIG["backend"]))
+
+
+def helper_backend_config() -> Dict[str, Any]:
+    return {
+        "name": "herdr-ime-helper",
+        "executable_candidates": [str(plugin_root() / "bin" / "herdr-ime-helper")],
+        "current_args": ["current"],
+        "select_args": ["select", "{id}", "--refresh", "--wait-ms", "150"],
+    }
 
 
 def atomic_write_text(path: Path, text: str) -> None:
@@ -129,6 +155,13 @@ def merge_config(value: Mapping[str, Any]) -> Dict[str, Any]:
         config["default_action"] = "keep"
     config["enabled"] = bool(config.get("enabled", True))
     config["debug"] = bool(config.get("debug", False))
+    config["notify_on_focus"] = bool(config.get("notify_on_focus", True))
+    config["pane_status_on_focus"] = bool(config.get("pane_status_on_focus", True))
+    config["focus_log"] = bool(config.get("focus_log", True))
+    try:
+        config["status_ttl_ms"] = max(1000, int(config.get("status_ttl_ms", 600000)))
+    except (TypeError, ValueError):
+        config["status_ttl_ms"] = 600000
     return config
 
 
@@ -201,6 +234,7 @@ class StateStore:
         self.session_dir = self.state_dir / "sessions" / identity.key
         self.state_path = self.session_dir / "state.json"
         self.dirty_path = self.session_dir / "focus.dirty"
+        self.focus_log_path = self.session_dir / "focus.log"
         self.debug_path = self.session_dir / "debug.log"
         self.debug_current_path = self.session_dir / "debug.current"
         self.focus_lock_path = self.session_dir / "focus.lock"
@@ -429,7 +463,7 @@ class HerdrClient:
         return None
 
     def _current_pane_cli(self) -> Optional[Dict[str, Any]]:
-        herdr_bin = self.env.get("HERDR_BIN_PATH") or shutil.which("herdr")
+        herdr_bin = self._herdr_bin()
         if not herdr_bin:
             return None
         child_env = dict(os.environ)
@@ -456,6 +490,111 @@ class HerdrClient:
         result = response.get("result", {})
         pane = result.get("pane") if isinstance(result, dict) else None
         return pane if isinstance(pane, dict) else None
+
+    def _herdr_bin(self) -> Optional[str]:
+        return self.env.get("HERDR_BIN_PATH") or shutil.which("herdr")
+
+    def _run_herdr(self, args: List[str], timeout: float = 1.0) -> CommandResult:
+        herdr_bin = self._herdr_bin()
+        if not herdr_bin:
+            return CommandResult(False, "", "herdr executable not found", None)
+        child_env = dict(os.environ)
+        child_env.update(self.env)
+        try:
+            completed = subprocess.run(
+                [herdr_bin] + args,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                check=False,
+                env=child_env,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return CommandResult(False, "", str(exc), None)
+        return CommandResult(
+            completed.returncode == 0,
+            completed.stdout.strip(),
+            completed.stderr.strip(),
+            completed.returncode,
+        )
+
+    def _run_herdr_json(self, args: List[str], timeout: float = 2.0) -> Dict[str, Any]:
+        result = self._run_herdr(args, timeout=timeout)
+        if not result.ok:
+            raise RuntimeError(result.stderr or result.stdout or "herdr command failed")
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"herdr returned invalid json: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError("herdr returned non-object json")
+        error = payload.get("error")
+        if error:
+            raise RuntimeError(str(error))
+        return payload
+
+    def list_workspaces(self) -> List[Dict[str, Any]]:
+        payload = self._run_herdr_json(["workspace", "list"], timeout=2.0)
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            return []
+        workspaces = result.get("workspaces", [])
+        return [item for item in workspaces if isinstance(item, dict)]
+
+    def list_tabs(self, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        args = ["tab", "list"]
+        if workspace_id:
+            args += ["--workspace", workspace_id]
+        payload = self._run_herdr_json(args, timeout=2.0)
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            return []
+        tabs = result.get("tabs", [])
+        return [item for item in tabs if isinstance(item, dict)]
+
+    def list_panes(self, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        args = ["pane", "list"]
+        if workspace_id:
+            args += ["--workspace", workspace_id]
+        payload = self._run_herdr_json(args, timeout=2.0)
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            return []
+        panes = result.get("panes", [])
+        return [item for item in panes if isinstance(item, dict)]
+
+    def show_notification(self, title: str, body: str) -> CommandResult:
+        return self._run_herdr(
+            [
+                "notification",
+                "show",
+                title,
+                "--body",
+                body,
+                "--position",
+                "top-right",
+                "--sound",
+                "none",
+            ],
+            timeout=1.5,
+        )
+
+    def report_pane_status(self, pane_id: str, status: str, ttl_ms: int) -> CommandResult:
+        return self._run_herdr(
+            [
+                "pane",
+                "report-metadata",
+                pane_id,
+                "--source",
+                "local.input-method-keeper",
+                "--custom-status",
+                status,
+                "--ttl-ms",
+                str(ttl_ms),
+            ],
+            timeout=1.5,
+        )
 
     def doctor(self) -> CommandResult:
         return CommandResult(True, "", "")
@@ -624,6 +763,433 @@ def pane_metadata(pane: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
+def short_input_source(input_source_id: Optional[str]) -> str:
+    if not input_source_id:
+        return "unknown"
+    return str(input_source_id).rsplit(".", 1)[-1]
+
+
+def previous_change_kind(
+    previous_pane_id: Optional[str],
+    previous_stored_input_source: Optional[str],
+    previous_observed_input_source: Optional[str],
+) -> str:
+    if not previous_pane_id or not previous_observed_input_source:
+        return "none"
+    if not previous_stored_input_source:
+        return "set"
+    if previous_stored_input_source != previous_observed_input_source:
+        return "changed"
+    return "same"
+
+
+def new_change_kind(select_action: Optional[str]) -> str:
+    if select_action == "selected":
+        return "switched"
+    if select_action == "already-current":
+        return "same"
+    if select_action == "no-target":
+        return "no-target"
+    return "unknown"
+
+
+def pane_marker(pane_id: Optional[str]) -> str:
+    if not pane_id:
+        return ""
+    value = str(pane_id)
+    if ":" in value:
+        workspace_id, local_pane_id = value.split(":", 1)
+        return f" ({local_pane_id} {workspace_id})"
+    return f" ({value})"
+
+
+def pane_parts(pane_id: Optional[str]) -> Tuple[str, str]:
+    if not pane_id:
+        return "-", "-"
+    value = str(pane_id)
+    if ":" in value:
+        workspace_id, local_pane_id = value.split(":", 1)
+        return local_pane_id or "-", workspace_id or "-"
+    return value, "-"
+
+
+def status_line(side: str, action: str, detail: str, pane_id: Optional[str]) -> str:
+    return f"{side:<4} {action:<4}: {detail}{pane_marker(pane_id)}"
+
+
+def focus_log_field(name: str, value: Optional[str]) -> str:
+    text = str(value) if value else "-"
+    return f"{name}={text}"
+
+
+def source_transition(before: Optional[str], after: Optional[str]) -> str:
+    before_short = short_input_source(before)
+    after_short = short_input_source(after)
+    if before_short == after_short:
+        return after_short
+    return f"{before_short}->{after_short}"
+
+
+def previous_action_code(
+    previous_pane_id: Optional[str],
+    previous_stored_input_source: Optional[str],
+    previous_observed_input_source: Optional[str],
+) -> str:
+    kind = previous_change_kind(
+        previous_pane_id,
+        previous_stored_input_source,
+        previous_observed_input_source,
+    )
+    if kind == "set":
+        return "INIT"
+    if kind == "changed":
+        return "CHNG"
+    if kind == "same":
+        return "SAME"
+    if previous_pane_id and not previous_observed_input_source:
+        return "MISS"
+    return "NONE"
+
+
+def current_action_code(select_action: Optional[str], reason: Optional[str]) -> str:
+    if reason == "same-pane":
+        return "SAME"
+    kind = new_change_kind(select_action)
+    if kind == "switched":
+        return "SWCH"
+    if kind == "same":
+        return "SAME"
+    if kind == "no-target":
+        return "NONE"
+    return "UNKN"
+
+
+def focus_status_title(
+    previous_pane_id: Optional[str],
+    previous_stored_input_source: Optional[str],
+    previous_observed_input_source: Optional[str],
+) -> str:
+    return previous_status_text(
+        previous_pane_id,
+        previous_stored_input_source,
+        previous_observed_input_source,
+    )
+
+
+def previous_status_text(
+    previous_pane_id: Optional[str],
+    previous_stored_input_source: Optional[str],
+    previous_observed_input_source: Optional[str],
+) -> str:
+    kind = previous_change_kind(
+        previous_pane_id, previous_stored_input_source, previous_observed_input_source
+    )
+    if not previous_pane_id:
+        return status_line("OLD", "NONE", "no previous pane", None)
+    if not previous_observed_input_source:
+        return status_line("OLD", "MISS", "not read", previous_pane_id)
+    if kind == "set":
+        return status_line(
+            "OLD",
+            "INIT",
+            f"unknown -> {short_input_source(previous_observed_input_source)}",
+            previous_pane_id,
+        )
+    if kind == "changed":
+        return status_line(
+            "OLD",
+            "CHNG",
+            (
+                f"{short_input_source(previous_stored_input_source)} -> "
+                f"{short_input_source(previous_observed_input_source)}"
+            ),
+            previous_pane_id,
+        )
+    return status_line(
+        "OLD",
+        "SAME",
+        short_input_source(previous_observed_input_source),
+        previous_pane_id,
+    )
+
+
+def current_status_text(
+    pane_id: str,
+    input_source_id: Optional[str],
+    backend_current_before_select: Optional[str],
+    select_action: Optional[str],
+    reason: Optional[str],
+) -> str:
+    if reason == "same-pane":
+        return status_line("NEW", "SAME", short_input_source(input_source_id), pane_id)
+    kind = new_change_kind(select_action)
+    if kind == "switched":
+        return status_line(
+            "NEW",
+            "SWCH",
+            (
+                f"{short_input_source(backend_current_before_select)} -> "
+                f"{short_input_source(input_source_id)}"
+            ),
+            pane_id,
+        )
+    if kind == "same":
+        return status_line("NEW", "SAME", short_input_source(input_source_id), pane_id)
+    if kind == "no-target":
+        return status_line(
+            "NEW",
+            "NONE",
+            short_input_source(backend_current_before_select),
+            pane_id,
+        )
+    return status_line(
+        "NEW",
+        "UNKN",
+        (
+            f"{short_input_source(backend_current_before_select)} -> "
+            f"{short_input_source(input_source_id)}"
+        ),
+        pane_id,
+    )
+
+
+def focus_status_body(
+    pane_id: str,
+    input_source_id: Optional[str],
+    mode: str,
+    default_input_source: Optional[str],
+    stored_input_source: Optional[str],
+    debug_enabled: bool,
+    previous_pane_id: Optional[str],
+    previous_stored_input_source: Optional[str],
+    previous_observed_input_source: Optional[str],
+    backend_current_before_select: Optional[str],
+    select_action: Optional[str],
+    reason: Optional[str],
+) -> str:
+    return (
+        f"{current_status_text(pane_id, input_source_id, backend_current_before_select, select_action, reason)}"
+        f" | default {short_input_source(default_input_source)}"
+    )
+
+
+def previous_focus_log_detail(
+    previous_pane_id: Optional[str],
+    previous_stored_input_source: Optional[str],
+    previous_observed_input_source: Optional[str],
+) -> str:
+    if not previous_pane_id:
+        return "no-previous"
+    if not previous_observed_input_source:
+        return "not-read"
+    return source_transition(previous_stored_input_source, previous_observed_input_source)
+
+
+def current_focus_log_detail(
+    input_source_id: Optional[str],
+    backend_current_before_select: Optional[str],
+    select_action: Optional[str],
+    reason: Optional[str],
+) -> str:
+    if reason == "same-pane" or select_action == "already-current":
+        return short_input_source(input_source_id)
+    if select_action == "no-target":
+        return short_input_source(backend_current_before_select)
+    return source_transition(backend_current_before_select, input_source_id)
+
+
+def focus_log_line(
+    store: StateStore,
+    pane_id: str,
+    input_source_id: Optional[str],
+    mode: str,
+    default_input_source: Optional[str],
+    stored_input_source: Optional[str],
+    previous_pane_id: Optional[str],
+    previous_stored_input_source: Optional[str],
+    previous_observed_input_source: Optional[str],
+    backend_current_before_select: Optional[str],
+    select_action: Optional[str],
+    reason: Optional[str],
+) -> str:
+    old_pane, old_workspace = pane_parts(previous_pane_id)
+    new_pane, new_workspace = pane_parts(pane_id)
+    old_action = previous_action_code(
+        previous_pane_id,
+        previous_stored_input_source,
+        previous_observed_input_source,
+    )
+    old_detail = previous_focus_log_detail(
+        previous_pane_id,
+        previous_stored_input_source,
+        previous_observed_input_source,
+    )
+    new_action = current_action_code(select_action, reason)
+    new_detail = current_focus_log_detail(
+        input_source_id,
+        backend_current_before_select,
+        select_action,
+        reason,
+    )
+    fields = [
+        local_now_for_log(),
+        focus_log_field("OLD", old_action),
+        focus_log_field("OLD_IME", old_detail),
+        focus_log_field("OLD_P", old_pane),
+        focus_log_field("OLD_W", old_workspace),
+        focus_log_field("NEW", new_action),
+        focus_log_field("NEW_IME", new_detail),
+        focus_log_field("NEW_P", new_pane),
+        focus_log_field("NEW_W", new_workspace),
+        focus_log_field("DEFAULT", short_input_source(default_input_source)),
+        focus_log_field("TARGET", short_input_source(input_source_id)),
+        focus_log_field("BEFORE", short_input_source(backend_current_before_select)),
+        focus_log_field("STORED", short_input_source(stored_input_source)),
+        focus_log_field("MODE", mode),
+        focus_log_field("ACTION", select_action),
+        focus_log_field("REASON", reason),
+        focus_log_field("SESSION", store.identity.label),
+    ]
+    return " ".join(fields).rstrip()
+
+
+def append_focus_log(
+    store: StateStore,
+    config: Mapping[str, Any],
+    pane_id: str,
+    input_source_id: Optional[str],
+    mode: str,
+    default_input_source: Optional[str],
+    stored_input_source: Optional[str],
+    previous_pane_id: Optional[str],
+    previous_stored_input_source: Optional[str],
+    previous_observed_input_source: Optional[str],
+    backend_current_before_select: Optional[str],
+    select_action: Optional[str],
+    reason: Optional[str],
+) -> Optional[str]:
+    if not bool(config.get("focus_log", True)):
+        return None
+    try:
+        store.session_dir.mkdir(parents=True, exist_ok=True)
+        with store.focus_log_path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                focus_log_line(
+                    store,
+                    pane_id,
+                    input_source_id,
+                    mode,
+                    default_input_source,
+                    stored_input_source,
+                    previous_pane_id,
+                    previous_stored_input_source,
+                    previous_observed_input_source,
+                    backend_current_before_select,
+                    select_action,
+                    reason,
+                )
+                + "\n"
+            )
+    except OSError as exc:
+        return f"focus_log_failed: {exc}"
+    return None
+
+
+def publish_focus_status(
+    store: StateStore,
+    config: Mapping[str, Any],
+    herdr: Any,
+    pane_id: str,
+    input_source_id: Optional[str],
+    mode: str,
+    stored_input_source: Optional[str] = None,
+    previous_pane_id: Optional[str] = None,
+    previous_stored_input_source: Optional[str] = None,
+    previous_observed_input_source: Optional[str] = None,
+    backend_current_before_select: Optional[str] = None,
+    select_action: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> None:
+    status = f"IME {short_input_source(input_source_id)}"
+    title = focus_status_title(
+        previous_pane_id,
+        previous_stored_input_source,
+        previous_observed_input_source,
+    )
+    body = focus_status_body(
+        pane_id,
+        input_source_id,
+        mode,
+        str(config.get("default_input_source", "")),
+        stored_input_source,
+        bool(config.get("debug", False)),
+        previous_pane_id,
+        previous_stored_input_source,
+        previous_observed_input_source,
+        backend_current_before_select,
+        select_action,
+        reason,
+    )
+    failures = []
+    focus_log_error = append_focus_log(
+        store,
+        config,
+        pane_id,
+        input_source_id,
+        mode,
+        str(config.get("default_input_source", "")),
+        stored_input_source,
+        previous_pane_id,
+        previous_stored_input_source,
+        previous_observed_input_source,
+        backend_current_before_select,
+        select_action,
+        reason,
+    )
+    if focus_log_error:
+        failures.append(focus_log_error)
+    if bool(config.get("pane_status_on_focus", True)) and hasattr(herdr, "report_pane_status"):
+        try:
+            result = herdr.report_pane_status(pane_id, status, int(config.get("status_ttl_ms", 600000)))
+            if isinstance(result, CommandResult) and not result.ok:
+                failures.append(f"pane_status_failed: {result.stderr or result.stdout}")
+        except Exception as exc:
+            failures.append(f"pane_status_failed: {exc}")
+    if bool(config.get("notify_on_focus", True)) and hasattr(herdr, "show_notification"):
+        try:
+            result = herdr.show_notification(title, body)
+            if isinstance(result, CommandResult) and not result.ok:
+                failures.append(f"notification_failed: {result.stderr or result.stdout}")
+        except Exception as exc:
+            failures.append(f"notification_failed: {exc}")
+    if failures:
+        log_debug(
+            store,
+            config,
+            {
+                "event": "focus-status",
+                "pane_id": pane_id,
+                "input_source_id": input_source_id,
+                "status": status,
+                "title": title,
+                "errors": failures,
+            },
+        )
+
+
+def current_pane_stored_source(state: Optional[Mapping[str, Any]], pane_id: str) -> Optional[str]:
+    if not isinstance(state, Mapping):
+        return None
+    panes = state.get("panes")
+    if not isinstance(panes, Mapping):
+        return None
+    entry = panes.get(pane_id)
+    if not isinstance(entry, Mapping):
+        return None
+    value = entry.get("input_source_id")
+    return str(value) if value else None
+
+
 def handle_event(
     command_event: str,
     env: Optional[Mapping[str, str]] = None,
@@ -750,6 +1316,18 @@ def handle_pane_focused(
                         },
                     )
                     store.clear_dirty()
+                    publish_focus_status(
+                        store,
+                        config,
+                        herdr,
+                        stable_pane_id,
+                        target or ensure_result.get("current"),
+                        "reset",
+                        None,
+                        backend_current_before_select=ensure_result.get("current"),
+                        select_action=ensure_result.get("action"),
+                        reason="reset-default",
+                    )
                     if should_loop_again(store, herdr, stable_pane_id, deadline):
                         continue
                     return 0
@@ -766,6 +1344,21 @@ def handle_pane_focused(
                     )
                     return 0
                 if state.get("last_focused_pane_id") == stable_pane_id:
+                    stored_source = current_pane_stored_source(state, stable_pane_id)
+                    status_input_source = stored_source
+                    try:
+                        status_input_source = backend.current()
+                    except Exception as exc:
+                        log_debug(
+                            store,
+                            config,
+                            {
+                                **focus_debug_base(config, "keep", stable_pane_id, stable_pane_id),
+                                "stored_target_input_source": stored_source,
+                                "reason": "same-pane-status-current-failed",
+                                "error": f"backend_current_failed: {exc}",
+                            },
+                        )
                     store.save(state)
                     store.clear_dirty()
                     log_debug(
@@ -778,15 +1371,30 @@ def handle_pane_focused(
                                 stable_pane_id,
                                 state.get("last_focused_pane_id"),
                             ),
+                            "backend_current_before_select": status_input_source,
+                            "stored_target_input_source": stored_source,
                             "reason": "same-pane",
                         },
+                    )
+                    publish_focus_status(
+                        store,
+                        config,
+                        herdr,
+                        stable_pane_id,
+                        status_input_source,
+                        "keep",
+                        stored_source,
+                        backend_current_before_select=status_input_source,
+                        reason="same-pane",
                     )
                     if should_loop_again(store, herdr, stable_pane_id, deadline):
                         continue
                     return 0
                 previous_pane_id = state.get("last_focused_pane_id")
                 pending_observation = None
+                previous_stored_source = None
                 if previous_pane_id and previous_pane_id != stable_pane_id:
+                    previous_stored_source = current_pane_stored_source(state, str(previous_pane_id))
                     try:
                         pending_observation = backend.current()
                     except Exception as exc:
@@ -873,12 +1481,29 @@ def handle_pane_focused(
                         **focus_debug_base(config, "keep", stable_pane_id, previous_pane_id),
                         "target_input_source": target,
                         "stored_target_input_source": target_entry.get("input_source_id"),
+                        "previous_stored_input_source": previous_stored_source,
+                        "previous_updated_input_source": pending_observation,
                         "observed_previous_input_source": pending_observation,
                         "backend_current_before_select": ensure_result.get("current"),
                         "select_action": ensure_result.get("action"),
                         "select_exit_code": ensure_result.get("select_exit_code"),
                         "reason": "restored-target",
                     },
+                )
+                publish_focus_status(
+                    store,
+                    config,
+                    herdr,
+                    stable_pane_id,
+                    str(target) if target else ensure_result.get("current"),
+                    "keep",
+                    target_entry.get("input_source_id"),
+                    previous_pane_id=str(previous_pane_id) if previous_pane_id else None,
+                    previous_stored_input_source=previous_stored_source,
+                    previous_observed_input_source=pending_observation,
+                    backend_current_before_select=ensure_result.get("current"),
+                    select_action=ensure_result.get("action"),
+                    reason="restored-target",
                 )
                 if should_loop_again(store, herdr, stable_pane_id, deadline):
                     continue
@@ -1053,6 +1678,323 @@ def handle_pane_moved(context: HerdrContext, store: StateStore, parsed: Mapping[
         return 0
 
 
+def backend_status(config: Mapping[str, Any], backend: Optional[Any]) -> Dict[str, Any]:
+    backend_config = config.get("backend")
+    if not isinstance(backend_config, dict):
+        backend_config = {}
+    return {
+        "name": backend_config.get("name"),
+        "executable": getattr(backend, "executable", None),
+        "current_args": backend_config.get("current_args"),
+        "select_args": backend_config.get("select_args"),
+    }
+
+
+def call_herdr_list(
+    diagnostics: List[str],
+    label: str,
+    func: Any,
+    *args: Any,
+) -> List[Dict[str, Any]]:
+    try:
+        value = func(*args)
+    except Exception as exc:
+        diagnostics.append(f"{label}_failed: {exc}")
+        return []
+    if not isinstance(value, list):
+        diagnostics.append(f"{label}_invalid")
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def display_source(input_source_id: Optional[str]) -> str:
+    return short_input_source(input_source_id)
+
+
+def display_bool(value: Any) -> str:
+    return "on" if bool(value) else "off"
+
+
+def display_path(value: Optional[str], width: int = 56) -> str:
+    if not value:
+        return "-"
+    text = str(value)
+    home = str(Path.home())
+    if text.startswith(home + "/"):
+        text = "~" + text[len(home):]
+    if len(text) <= width:
+        return text
+    return "..." + text[-(width - 3):]
+
+
+def display_time(value: Optional[str]) -> str:
+    if not value:
+        return "-"
+    text = str(value)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed.astimezone().strftime("%m-%d %H:%M:%S")
+    except Exception:
+        return text[:19]
+
+
+def tail_lines(path: Path, count: int) -> List[str]:
+    try:
+        lines: Deque[str] = deque(maxlen=count)
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                lines.append(line.rstrip("\n"))
+        return list(lines)
+    except FileNotFoundError:
+        return []
+    except OSError as exc:
+        return [f"failed to read {path}: {exc}"]
+
+
+def tab_sort_key(tab_id: str, tab_by_id: Mapping[str, Mapping[str, Any]]) -> Tuple[int, str]:
+    tab = tab_by_id.get(tab_id, {})
+    number = tab.get("number")
+    return (int(number) if isinstance(number, int) else 999999, tab_id)
+
+
+def workspace_sort_key(
+    workspace_id: str,
+    workspace_by_id: Mapping[str, Mapping[str, Any]],
+) -> Tuple[int, str]:
+    workspace = workspace_by_id.get(workspace_id, {})
+    number = workspace.get("number")
+    return (int(number) if isinstance(number, int) else 999999, workspace_id)
+
+
+def pane_sort_key(pane_id: str) -> Tuple[str, str]:
+    local_pane_id, workspace_id = pane_parts(pane_id)
+    return (workspace_id, local_pane_id)
+
+
+def collect_dashboard_data(
+    env: Mapping[str, str],
+    backend: Optional[Any],
+    herdr: Any,
+) -> Dict[str, Any]:
+    config_dir = Path(env.get("HERDR_PLUGIN_CONFIG_DIR", "."))
+    state_dir = Path(env.get("HERDR_PLUGIN_STATE_DIR", "."))
+    diagnostics: List[str] = []
+    try:
+        config = load_config(config_dir, readonly=True)
+        if not config_path(config_dir).exists():
+            diagnostics.append("config_missing")
+    except ConfigError as exc:
+        diagnostics.append(str(exc))
+        config = default_config()
+    identity = session_identity(config, env)
+    store = StateStore(state_dir, identity)
+    state, state_diag = store.load(readonly=True)
+    if state_diag:
+        diagnostics.append(state_diag)
+    current_input_source = None
+    if backend is not None:
+        try:
+            current_input_source = backend.current()
+        except Exception as exc:
+            diagnostics.append(f"backend_current_failed: {exc}")
+
+    workspaces = call_herdr_list(diagnostics, "workspace_list", herdr.list_workspaces)
+    panes = call_herdr_list(diagnostics, "pane_list", herdr.list_panes)
+    tabs: List[Dict[str, Any]] = []
+    if workspaces:
+        for workspace in workspaces:
+            workspace_id = workspace.get("workspace_id")
+            if workspace_id:
+                tabs.extend(
+                    call_herdr_list(
+                        diagnostics,
+                        f"tab_list:{workspace_id}",
+                        herdr.list_tabs,
+                        str(workspace_id),
+                    )
+                )
+    else:
+        tabs = call_herdr_list(diagnostics, "tab_list", herdr.list_tabs)
+
+    return {
+        "config": config,
+        "identity": identity,
+        "store": store,
+        "state": state if isinstance(state, dict) else None,
+        "current_input_source": current_input_source,
+        "backend": backend_status(config, backend),
+        "workspaces": workspaces,
+        "tabs": tabs,
+        "panes": panes,
+        "diagnostics": diagnostics,
+    }
+
+
+def render_dashboard(data: Mapping[str, Any]) -> str:
+    config = data.get("config") if isinstance(data.get("config"), dict) else {}
+    state = data.get("state") if isinstance(data.get("state"), dict) else None
+    identity = data.get("identity")
+    store = data.get("store")
+    backend = data.get("backend") if isinstance(data.get("backend"), dict) else {}
+    diagnostics = data.get("diagnostics") if isinstance(data.get("diagnostics"), list) else []
+    workspaces = data.get("workspaces") if isinstance(data.get("workspaces"), list) else []
+    tabs = data.get("tabs") if isinstance(data.get("tabs"), list) else []
+    panes = data.get("panes") if isinstance(data.get("panes"), list) else []
+    state_panes = state.get("panes", {}) if isinstance(state, dict) and isinstance(state.get("panes"), dict) else {}
+
+    workspace_by_id = {
+        str(workspace.get("workspace_id")): workspace
+        for workspace in workspaces
+        if workspace.get("workspace_id")
+    }
+    tab_by_id = {
+        str(tab.get("tab_id")): tab
+        for tab in tabs
+        if tab.get("tab_id")
+    }
+    pane_by_id = {
+        str(pane.get("pane_id")): pane
+        for pane in panes
+        if pane.get("pane_id")
+    }
+
+    workspace_ids = set(workspace_by_id)
+    tab_ids_by_workspace: Dict[str, set] = {}
+    pane_ids_by_tab: Dict[str, set] = {}
+    for tab_id, tab in tab_by_id.items():
+        workspace_id = str(tab.get("workspace_id") or tab_id.split(":", 1)[0])
+        workspace_ids.add(workspace_id)
+        tab_ids_by_workspace.setdefault(workspace_id, set()).add(tab_id)
+    for pane_id, pane in pane_by_id.items():
+        workspace_id = str(pane.get("workspace_id") or pane_id.split(":", 1)[0])
+        tab_id = str(pane.get("tab_id") or f"{workspace_id}:unknown")
+        workspace_ids.add(workspace_id)
+        tab_ids_by_workspace.setdefault(workspace_id, set()).add(tab_id)
+        pane_ids_by_tab.setdefault(tab_id, set()).add(pane_id)
+    for pane_id, pane_state in state_panes.items():
+        if not isinstance(pane_state, dict):
+            continue
+        workspace_id = str(pane_state.get("workspace_id") or str(pane_id).split(":", 1)[0])
+        tab_id = str(pane_state.get("tab_id") or f"{workspace_id}:state")
+        workspace_ids.add(workspace_id)
+        tab_ids_by_workspace.setdefault(workspace_id, set()).add(tab_id)
+        pane_ids_by_tab.setdefault(tab_id, set()).add(str(pane_id))
+
+    now = datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+    session_label = getattr(identity, "label", "-")
+    session_key = getattr(identity, "key", "-")
+    focus_log_path = str(getattr(store, "focus_log_path", "-"))
+    lines = [
+        f"Input Method Keeper Dashboard  {now}",
+        (
+            f"session={session_label} key={session_key} "
+            f"state_panes={len(state_panes)} live_panes={len(panes)}"
+        ),
+        (
+            f"enabled={display_bool(config.get('enabled'))} "
+            f"debug={display_bool(config.get('debug'))} "
+            f"action={config.get('default_action', '-')} "
+            f"backend={backend.get('name') or '-'}"
+        ),
+        (
+            f"default={display_source(config.get('default_input_source'))} "
+            f"current={display_source(data.get('current_input_source'))} "
+            f"notify={display_bool(config.get('notify_on_focus'))} "
+            f"pane_status={display_bool(config.get('pane_status_on_focus'))} "
+            f"focus_log={display_bool(config.get('focus_log'))}"
+        ),
+        f"backend_exe={display_path(backend.get('executable'), width=92)}",
+        f"focus_log_path={focus_log_path}",
+    ]
+    if diagnostics:
+        lines.append("diagnostics=" + " | ".join(str(item) for item in diagnostics))
+    lines.append("")
+    lines.append("Workspaces")
+
+    if not workspace_ids:
+        lines.append("  (no live or stored panes)")
+    for workspace_id in sorted(workspace_ids, key=lambda item: workspace_sort_key(item, workspace_by_id)):
+        workspace = workspace_by_id.get(workspace_id, {})
+        workspace_label = workspace.get("label") or workspace_id
+        workspace_marker = "*" if workspace.get("focused") else " "
+        workspace_number = workspace.get("number", "-")
+        active_tab_id = workspace.get("active_tab_id", "-")
+        lines.append(
+            (
+                f"{workspace_marker} workspace {workspace_number} "
+                f"{workspace_label} {workspace_id} active={active_tab_id}"
+            )
+        )
+        tab_ids = tab_ids_by_workspace.get(workspace_id, set())
+        if not tab_ids:
+            lines.append("    (no tabs)")
+            continue
+        for tab_id in sorted(tab_ids, key=lambda item: tab_sort_key(item, tab_by_id)):
+            tab = tab_by_id.get(tab_id, {})
+            tab_marker = "*" if tab.get("focused") or active_tab_id == tab_id else " "
+            tab_label = tab.get("label") or tab_id.rsplit(":", 1)[-1]
+            tab_number = tab.get("number", "-")
+            lines.append(f"  {tab_marker} tab {tab_number} {tab_label} {tab_id}")
+            pane_ids = pane_ids_by_tab.get(tab_id, set())
+            if not pane_ids:
+                lines.append("      (no panes)")
+                continue
+            for pane_id in sorted(pane_ids, key=pane_sort_key):
+                live = pane_by_id.get(pane_id)
+                pane_state = state_panes.get(pane_id)
+                if not isinstance(pane_state, dict):
+                    pane_state = {}
+                marker = "*" if isinstance(live, dict) and live.get("focused") else " "
+                local_pane_id, _workspace = pane_parts(pane_id)
+                live_status = live.get("custom_status") if isinstance(live, dict) else None
+                agent = live.get("agent") if isinstance(live, dict) else pane_state.get("agent")
+                agent_status = live.get("agent_status") if isinstance(live, dict) else None
+                cwd = live.get("foreground_cwd") if isinstance(live, dict) else None
+                if not cwd:
+                    cwd = live.get("cwd") if isinstance(live, dict) else pane_state.get("cwd")
+                live_flag = "live" if isinstance(live, dict) else "state-only"
+                lines.append(
+                    (
+                        f"    {marker} {local_pane_id:<4} {live_flag:<10} "
+                        f"stored={display_source(pane_state.get('input_source_id')):<8} "
+                        f"status={live_status or '-':<12} "
+                        f"agent={(agent or '-')}/{agent_status or '-'} "
+                        f"updated={display_time(pane_state.get('updated_at'))} "
+                        f"cwd={display_path(cwd, width=52)}"
+                    )
+                )
+
+    if isinstance(store, StateStore):
+        focus_tail = tail_lines(store.focus_log_path, 5)
+        lines.append("")
+        lines.append("focus.log tail")
+        if focus_tail:
+            lines.extend(f"  {line}" for line in focus_tail)
+        else:
+            lines.append("  (empty)")
+    lines.append("")
+    lines.append("Ctrl-C closes this dashboard pane. It is read-only.")
+    return "\n".join(lines)
+
+
+def run_dashboard(
+    env: Mapping[str, str],
+    backend: Optional[Any],
+    herdr: Optional[Any] = None,
+    interval_seconds: float = 1.0,
+    once: bool = False,
+) -> int:
+    herdr = herdr if herdr is not None else HerdrClient(env)
+    while True:
+        data = collect_dashboard_data(env, backend, herdr)
+        output = render_dashboard(data)
+        if once:
+            print(output)
+            return 0
+        print("\033[2J\033[H" + output, flush=True)
+        time.sleep(max(0.2, interval_seconds))
+
+
 def print_status(env: Mapping[str, str], backend: Optional[Any] = None) -> int:
     config_dir = Path(env.get("HERDR_PLUGIN_CONFIG_DIR", "."))
     state_dir = Path(env.get("HERDR_PLUGIN_STATE_DIR", "."))
@@ -1082,6 +2024,12 @@ def print_status(env: Mapping[str, str], backend: Optional[Any] = None) -> int:
         "session_key": identity.key,
         "default_action": config.get("default_action"),
         "default_input_source": config.get("default_input_source"),
+        "notify_on_focus": config.get("notify_on_focus"),
+        "pane_status_on_focus": config.get("pane_status_on_focus"),
+        "focus_log": config.get("focus_log"),
+        "focus_log_path": str(store.focus_log_path),
+        "status_ttl_ms": config.get("status_ttl_ms"),
+        "backend": backend_status(config, backend),
         "current_input_source": current_input_source,
         "state": state,
         "diagnostics": diagnostics,
@@ -1220,6 +2168,12 @@ def mutate_config(env: Mapping[str, str], mutation: str, value: Optional[str], b
         elif mutation == "set-default-input-source":
             config["default_input_source"] = backend.current()
             write_config(context.config_dir, config)
+        elif mutation == "set-backend-helper":
+            config["backend"] = helper_backend_config()
+            write_config(context.config_dir, config)
+        elif mutation == "set-backend-macism":
+            config["backend"] = macism_backend_config()
+            write_config(context.config_dir, config)
         else:
             return 2
     return 0
@@ -1245,6 +2199,34 @@ def main(
     command = argv[0]
     if command == "status":
         return print_status(actual_env, backend=backend)
+    if command == "dashboard":
+        once = False
+        interval_seconds = 1.0
+        index = 1
+        while index < len(argv):
+            if argv[index] == "--once":
+                once = True
+                index += 1
+            elif argv[index] == "--interval":
+                if index + 1 >= len(argv):
+                    print("usage: ime-keeper dashboard [--once] [--interval seconds]", file=sys.stderr)
+                    return 2
+                try:
+                    interval_seconds = float(argv[index + 1])
+                except ValueError:
+                    print("dashboard interval must be a number", file=sys.stderr)
+                    return 2
+                index += 2
+            else:
+                print(f"unknown dashboard option: {argv[index]}", file=sys.stderr)
+                return 2
+        return run_dashboard(
+            actual_env,
+            backend=backend,
+            herdr=herdr,
+            interval_seconds=interval_seconds,
+            once=once,
+        )
     if command == "doctor":
         flags = set(argv[1:])
         unknown_flags = sorted(flags - {"--gc-all", "--select-self-test"})
@@ -1273,6 +2255,8 @@ def main(
         "debug-on",
         "debug-off",
         "set-default-input-source",
+        "set-backend-helper",
+        "set-backend-macism",
     }:
         return mutate_config(actual_env, command, None, backend)
     print(f"unknown command: {command}", file=sys.stderr)

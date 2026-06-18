@@ -59,6 +59,12 @@ herdr plugin action invoke set-default-action-keep --plugin local.input-method-k
 herdr plugin action invoke debug-on --plugin local.input-method-keeper
 ```
 
+Optional live dashboard:
+
+```sh
+herdr plugin pane open --plugin local.input-method-keeper --entrypoint dashboard
+```
+
 Typical manual check:
 
 1. Focus pane A and switch to input source A.
@@ -102,6 +108,8 @@ herdr plugin action invoke <action-id> --plugin local.input-method-keeper
 | `set-default-action-ignore` | Do nothing on focus changes. Clears state. |
 | `debug-on` | Set `debug` to true. |
 | `debug-off` | Set `debug` to false. |
+| `set-backend-helper` | Use the Swift helper backend with `--refresh`. |
+| `set-backend-macism` | Restore the default `macism` backend. |
 | `doctor` | Run repair-capable diagnostics. |
 | `doctor-gc-all` | Run diagnostics and remove old non-current session state. |
 
@@ -110,6 +118,34 @@ herdr plugin action invoke <action-id> --plugin local.input-method-keeper
 The plugin does not register default keybindings. The manifest only registers
 actions and event hooks. Run actions through Herdr's action UI, `herdr plugin
 action invoke`, or bind those action ids in your Herdr key configuration.
+
+## Dashboard Pane
+
+Open the read-only dashboard while testing:
+
+```sh
+herdr plugin pane open --plugin local.input-method-keeper --entrypoint dashboard
+```
+
+Herdr returns the opened plugin pane id. Use that pane id if you want to focus
+or close it later:
+
+```sh
+herdr plugin pane focus <pane-id>
+herdr plugin pane close <pane-id>
+```
+
+The dashboard refreshes in place and shows:
+
+- current session label and state key
+- enabled/debug/default action/backend/default input source
+- current macOS input source reported by the backend
+- live Herdr workspaces, tabs, and panes
+- each pane's stored input source and live `custom_status`
+- current session `focus.log` path and recent tail
+
+The dashboard pane is not special-cased by the plugin. It is handled like any
+other Herdr pane, so it can also get its own remembered input source.
 
 ## Config
 
@@ -128,6 +164,10 @@ The file is `config.json`:
   "session_name": "auto",
   "default_action": "keep",
   "default_input_source": "com.apple.keylayout.ABC",
+  "notify_on_focus": true,
+  "pane_status_on_focus": true,
+  "focus_log": true,
+  "status_ttl_ms": 600000,
   "backend": {
     "name": "macism",
     "executable_candidates": [
@@ -147,6 +187,9 @@ Most users should only change:
 - `debug`
 - `default_action`
 - `default_input_source`
+- `notify_on_focus`
+- `pane_status_on_focus`
+- `focus_log`
 
 `session_name = "auto"` is recommended. The plugin stores state separately per
 Herdr session using the Herdr socket path, so different sessions do not share
@@ -169,6 +212,40 @@ later. The plugin expects the backend to support:
 ```text
 current() -> input_source_id
 select(input_source_id) -> success/failure
+```
+
+This repo also includes a Swift helper backend:
+
+```sh
+input-method-keeper/bin/herdr-ime-helper current
+input-method-keeper/bin/herdr-ime-helper list
+input-method-keeper/bin/herdr-ime-helper select com.apple.keylayout.ABC
+input-method-keeper/bin/herdr-ime-helper select com.apple.keylayout.ABC --refresh --wait-ms 150
+input-method-keeper/bin/herdr-ime-helper refresh --wait-ms 150
+```
+
+The helper uses macOS TIS APIs directly. `--refresh` creates a tiny temporary
+AppKit window to refresh the current input context; the helper does not decide
+when refresh is needed. This has manually fixed the observed WeType
+`pinyin -> ABC` Shift-hotkey residue in Herdr. To use it as the backend, set
+`backend` to:
+
+```json
+{
+  "name": "herdr-ime-helper",
+  "executable_candidates": [
+    "/Users/ppggff/xxx/herdr-plugin/input-method-keeper/bin/herdr-ime-helper"
+  ],
+  "current_args": ["current"],
+  "select_args": ["select", "{id}", "--refresh", "--wait-ms", "150"]
+}
+```
+
+The same switch can be done through actions:
+
+```sh
+herdr plugin action invoke set-backend-helper --plugin local.input-method-keeper
+herdr plugin action invoke set-backend-macism --plugin local.input-method-keeper
 ```
 
 ## Testing
@@ -233,6 +310,37 @@ issues:
 - select action: `selected`, `already-current`, or `no-target`
 - skip/failure reason when no switch happens
 
+By default, each successful focus decision also shows a compact Herdr
+notification. Herdr currently renders notification bodies as a single line in
+practice, so the plugin uses only the title and one body line:
+
+```text
+title: OLD  CHNG: ABC -> ITABC (<pane> <workspace>)
+body:  NEW  SWCH: ITABC -> ABC (<pane> <workspace>) | default ABC
+```
+
+The action field is fixed to four characters for readability: `INIT`, `CHNG`,
+`SAME`, `SWCH`, `NONE`, `MISS`, or `UNKN`. `OLD` describes the pane losing
+focus; `NEW` describes the pane gaining focus. Pane markers put the pane first
+and workspace second, for example `w1:p2` is shown as `(p2 w1)`. The plugin also
+writes `custom_status` to the focused pane metadata, so `herdr pane current`
+shows a value such as `IME ITABC`. Set `notify_on_focus` or
+`pane_status_on_focus` to `false` after the trial if that is too noisy.
+
+If `focus_log` is enabled, every successful focus decision is also appended to
+`focus.log` in the current session state directory as one compact line:
+
+```text
+2026-06-18T21:00:00.000+08:00 OLD=INIT OLD_IME=unknown->ABC OLD_P=p1 OLD_W=w1 NEW=SWCH NEW_IME=ABC->ITABC NEW_P=p2 NEW_W=w1 DEFAULT=ABC TARGET=ITABC BEFORE=ABC STORED=ITABC MODE=keep ACTION=selected REASON=restored-target SESSION=default
+```
+
+Run `status` to see the exact `focus_log_path`, then follow that file. `-F`
+keeps waiting even if the file has not been created by the next focus event yet:
+
+```sh
+tail -F /path/from/status/focus.log
+```
+
 Useful direct checks:
 
 ```sh
@@ -258,6 +366,13 @@ input-method-keeper/scripts/herdr_smoke.py --link --full-ime
 - If macOS itself restores an app-specific input source before the event hook
   runs, the plugin may attribute that observed input source to the previous
   pane.
+- With `macism` v3.1.1, switching from a CJK input method such as WeType pinyin
+  to `com.apple.keylayout.ABC` may update the system input source while leaving
+  Herdr's current text input context stale. A visible symptom is that WeType's
+  Shift hotkey still toggles Chinese/English until focus moves to another app
+  and back. This appears to need an input-context refresh, not just a longer
+  wait. The Swift helper backend with `--refresh` has manually fixed this
+  symptom in Herdr; the limitation remains for the default `macism` backend.
 - Version 1 has no rule engine and no ignore list.
 - Stale cross-session state is removed only by `doctor-gc-all` /
   `doctor --gc-all`, or by a future Herdr session lifecycle event.

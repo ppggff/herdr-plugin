@@ -40,10 +40,17 @@ brew install macism
 Python 3.9 or newer is required. Version 1 uses only Python standard-library
 modules.
 
-`macism` is preferred over a custom Swift helper in version 1 because it already
-handles macOS CJK input-source switching reliability issues. A future version
-can add a bundled Swift helper fallback if avoiding external dependencies
-becomes more important.
+`macism` remains the default backend, but this repo also carries a small Swift
+helper backend for input-context refresh testing.
+
+Observed limitation: `macism` v3.1.1 only runs its TemporaryWindow workaround
+when the target source is CJKV. When the plugin switches from WeType pinyin to
+`com.apple.keylayout.ABC`, `macism` calls `TISSelectInputSource` directly. The
+system source can report ABC while Herdr's current text input context still
+handles WeType's Shift hotkey until the user focuses another app and returns.
+Passing a larger wait argument to `macism` does not address this ABC target
+path. The Swift helper backend with `select <id> --refresh --wait-ms 150` has
+been manually validated to clear this residue in Herdr.
 
 Reference:
 
@@ -153,6 +160,26 @@ select command:  macism {id}
 Version 1 allows overriding the backend command in config so users can switch to
 `im-select`, a local Swift helper, or another executable without changing code.
 
+Local Swift helper backend:
+
+```text
+bin/herdr-ime-helper current
+bin/herdr-ime-helper list
+bin/herdr-ime-helper select <input_source_id> [--refresh] [--wait-ms N]
+bin/herdr-ime-helper refresh [--wait-ms N]
+```
+
+`bin/herdr-ime-helper` is a POSIX wrapper around
+`helpers/herdr-ime-helper.swift`. It compiles the Swift source with `swiftc` on
+first run, caching the binary under `HERDR_PLUGIN_STATE_DIR/helper-build` when
+Herdr provides a state directory, or under `TMPDIR` for manual runs. The Swift
+code uses TIS APIs for `current`, `list`, and `select`. `--refresh` only creates
+a tiny temporary AppKit window and waits; it intentionally contains no CJKV or
+policy logic. The Python plugin remains the policy owner and may later decide
+when to add `--refresh` to select calls. The actions
+`set-backend-helper` and `set-backend-macism` switch `config.json` between the
+helper and the default `macism` backend.
+
 ## Config
 
 Config lives at `HERDR_PLUGIN_CONFIG_DIR/config.json`.
@@ -164,6 +191,10 @@ Config lives at `HERDR_PLUGIN_CONFIG_DIR/config.json`.
   "session_name": "auto",
   "default_action": "keep",
   "default_input_source": "com.apple.keylayout.ABC",
+  "notify_on_focus": true,
+  "pane_status_on_focus": true,
+  "focus_log": true,
+  "status_ttl_ms": 600000,
   "backend": {
     "name": "macism",
     "executable_candidates": [
@@ -200,6 +231,23 @@ Config semantics:
 - Removing or blanking `default_input_source` means `keep` restores only stored
   pane memory and `reset` does nothing beyond any state clearing already done
   when entering `reset`.
+- `notify_on_focus = true` shows a Herdr notification after each successful
+  focus decision. This is intentionally noisy for early real-world diagnosis.
+  Herdr currently renders notification bodies as one practical line, so keep
+  notification text to two concise fields: title for the pane losing focus
+  (`OLD  CHNG: A -> B (<pane> <workspace>)`) and body for the newly focused pane
+  plus default source (`NEW  SWCH: A -> B (<pane> <workspace>) | default X`).
+  Use fixed four-character action codes: `INIT`, `CHNG`, `SAME`, `SWCH`,
+  `NONE`, `MISS`, and `UNKN`.
+- `pane_status_on_focus = true` writes `custom_status = "IME <source>"` to the
+  focused pane metadata after each successful focus decision. This makes the
+  selected input source visible in `herdr pane current` even if the UI does not
+  render that metadata.
+- `focus_log = true` appends one compact text line per successful focus
+  decision to `focus.log` in the current session state directory. This is for
+  `tail -f` style observation; it is intentionally separate from JSON debug
+  logs.
+- `status_ttl_ms` controls how long the pane metadata status remains valid.
 
 `keep` is the only mode that uses pane memory state. Switching
 `default_action` to `reset` or `ignore` deletes the current Herdr session's pane
@@ -688,6 +736,8 @@ set-default-action-reset
 set-default-action-ignore
 debug-on
 debug-off
+set-backend-helper
+set-backend-macism
 doctor
 doctor-gc-all
 ```
@@ -715,6 +765,10 @@ Action behavior:
   `config.json` and clear the current Herdr session's state.
 - `debug-on`: write `debug = true` to `config.json`.
 - `debug-off`: write `debug = false` to `config.json`.
+- `set-backend-helper`: write the bundled Swift helper backend config to
+  `config.json`.
+- `set-backend-macism`: write the default `macism` backend config to
+  `config.json`.
 - `doctor`: acquire `run.lock`, verify the wrapper, resolved Python, backend
   executor, Herdr env, `HERDR_BIN_PATH`, config dir, state dir, config/state
   loading and repair, shared state policy, and current input source read. It may
@@ -742,6 +796,50 @@ When `enabled` is false, event hooks run only the shared policy's idempotent
 state clear and then return. User-invoked configuration, status, and doctor
 actions may still run so the user can inspect or change `config.json`.
 
+## Dashboard Pane
+
+The manifest exposes one plugin pane entrypoint:
+
+```toml
+[[panes]]
+id = "dashboard"
+title = "Input method keeper dashboard"
+placement = "split"
+command = ["sh", "bin/ime-keeper", "dashboard"]
+```
+
+Plugin panes resolve the first command through `PATH`, so the pane entrypoint
+uses `sh` and passes the repo-local wrapper as an argument. Action and event
+commands can continue to use `bin/ime-keeper` directly.
+
+Open it with:
+
+```sh
+herdr plugin pane open --plugin local.input-method-keeper --entrypoint dashboard
+```
+
+`bin/ime-keeper dashboard` is read-only. It refreshes in place once per second
+by default and can be run manually with `--once` for tests:
+
+```sh
+bin/ime-keeper dashboard --once
+bin/ime-keeper dashboard --interval 2
+```
+
+The dashboard collects:
+
+- effective config and session identity
+- backend executable and backend-reported current input source
+- current session state file contents
+- live Herdr workspaces, tabs, and panes from Herdr CLI list commands
+- the recent tail of the current session's `focus.log`
+
+It must not acquire `run.lock`, mutate config, repair broken files, clear state,
+or select an input source. Backend `current` and Herdr list failures should be
+rendered as diagnostics, not treated as fatal. The dashboard pane is deliberately
+not ignored by focus handling; it is just another Herdr pane and can have its
+own remembered input source.
+
 ## Draft Manifest
 
 ```toml
@@ -751,6 +849,12 @@ version = "0.1.0"
 min_herdr_version = "0.7.0"
 description = "Keep macOS input sources stable per Herdr pane."
 platforms = ["macos"]
+
+[[panes]]
+id = "dashboard"
+title = "Input method keeper dashboard"
+placement = "split"
+command = ["sh", "bin/ime-keeper", "dashboard"]
 
 [[actions]]
 id = "toggle-enabled"
@@ -791,6 +895,16 @@ command = ["bin/ime-keeper", "debug-on"]
 id = "debug-off"
 title = "Disable input method keeper debug logging"
 command = ["bin/ime-keeper", "debug-off"]
+
+[[actions]]
+id = "set-backend-helper"
+title = "Use Swift input method helper"
+command = ["bin/ime-keeper", "set-backend-helper"]
+
+[[actions]]
+id = "set-backend-macism"
+title = "Use macism input method backend"
+command = ["bin/ime-keeper", "set-backend-macism"]
 
 [[actions]]
 id = "doctor"
@@ -990,6 +1104,9 @@ context.
 - If macOS itself restores a document/app-specific input source before the event
   hook runs, the plugin may attribute that observed input source to the previous
   pane.
+- With `macism` v3.1.1, switching from WeType pinyin to ABC can leave Herdr's
+  text input context stale even though `macism` reports ABC. The Swift helper
+  backend's `--refresh` path has manually fixed this symptom in Herdr.
 - Version 1 has no rule engine and no ignore list. Use
   `default_action = "ignore"` or `enabled = false` to pause the plugin globally,
   or switch `default_action` to `reset` when all panes should use the default

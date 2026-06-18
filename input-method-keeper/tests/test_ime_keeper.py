@@ -47,6 +47,11 @@ class FailingBackend(FakeBackend):
 class FakeHerdr:
     def __init__(self, pane_ids):
         self.pane_ids = list(pane_ids)
+        self.notifications = []
+        self.pane_statuses = []
+        self.workspaces = []
+        self.tabs = []
+        self.panes = []
 
     def current_pane(self):
         pane_id = self.pane_ids.pop(0) if self.pane_ids else ""
@@ -62,6 +67,29 @@ class FakeHerdr:
 
     def doctor(self):
         return ime_keeper.CommandResult(True, "", "")
+
+    def show_notification(self, title, body):
+        self.notifications.append({"title": title, "body": body})
+        return ime_keeper.CommandResult(True, "", "")
+
+    def report_pane_status(self, pane_id, status, ttl_ms):
+        self.pane_statuses.append(
+            {"pane_id": pane_id, "status": status, "ttl_ms": ttl_ms}
+        )
+        return ime_keeper.CommandResult(True, "", "")
+
+    def list_workspaces(self):
+        return list(self.workspaces)
+
+    def list_tabs(self, workspace_id=None):
+        if workspace_id:
+            return [tab for tab in self.tabs if tab.get("workspace_id") == workspace_id]
+        return list(self.tabs)
+
+    def list_panes(self, workspace_id=None):
+        if workspace_id:
+            return [pane for pane in self.panes if pane.get("workspace_id") == workspace_id]
+        return list(self.panes)
 
 
 class TempEnvTest(unittest.TestCase):
@@ -346,6 +374,56 @@ class EventHandlerTests(TempEnvTest):
         self.assertEqual(state["last_focused_pane_id"], "w1:p2")
         self.assertEqual(backend.selected, ["com.apple.inputmethod.SCIM.ITABC"])
 
+    def test_focus_keep_publishes_default_notification_and_pane_status(self):
+        self.write_config(
+            default_action="keep",
+            default_input_source="com.apple.keylayout.ABC",
+        )
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        state = ime_keeper.empty_state(context.identity)
+        state["last_focused_pane_id"] = "w1:p1"
+        state["panes"] = {
+            "w1:p2": {
+                "input_source_id": "com.apple.inputmethod.SCIM.ITABC",
+                "workspace_id": "w1",
+                "tab_id": "w1:t1",
+            }
+        }
+        store.save(state)
+        event = {"event": "pane_focused", "data": {"pane_id": "w1:p2", "workspace_id": "w1"}}
+        backend = FakeBackend(["com.apple.keylayout.ABC", "com.apple.keylayout.ABC"])
+        herdr = FakeHerdr(["w1:p2", "w1:p2", "w1:p2", "w1:p2"])
+
+        ime_keeper.handle_event(
+            "pane-focused",
+            self.env,
+            backend=backend,
+            herdr=herdr,
+            event=event,
+            debounce_seconds=0,
+        )
+
+        self.assertEqual(
+            herdr.pane_statuses,
+            [{"pane_id": "w1:p2", "status": "IME ITABC", "ttl_ms": 600000}],
+        )
+        self.assertEqual(herdr.notifications[0]["title"], "OLD  INIT: unknown -> ABC (p1 w1)")
+        self.assertEqual(
+            herdr.notifications[0]["body"],
+            "NEW  SWCH: ABC -> ITABC (p2 w1) | default ABC",
+        )
+        focus_lines = store.focus_log_path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(focus_lines), 1)
+        self.assertRegex(focus_lines[0], r"^\d{4}-\d{2}-\d{2}T")
+        self.assertIn(
+            " OLD=INIT OLD_IME=unknown->ABC OLD_P=p1 OLD_W=w1 "
+            "NEW=SWCH NEW_IME=ABC->ITABC NEW_P=p2 NEW_W=w1 "
+            "DEFAULT=ABC TARGET=ITABC BEFORE=ABC STORED=ITABC "
+            "MODE=keep ACTION=selected REASON=restored-target SESSION=work",
+            focus_lines[0],
+        )
+
     def test_focus_keep_debug_log_contains_decision_context(self):
         self.write_config(
             default_action="keep",
@@ -417,6 +495,111 @@ class CliTests(TempEnvTest):
         self.assertFalse(store.debug_path.exists())
         self.assertFalse(store.debug_current_path.exists())
         self.assertEqual(list(store.session_dir.glob("debug.*.log")), [])
+
+    def test_dashboard_once_renders_config_live_panes_state_and_focus_log(self):
+        self.write_config(
+            debug=True,
+            default_action="keep",
+            default_input_source="com.apple.keylayout.ABC",
+        )
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        state = ime_keeper.empty_state(context.identity)
+        state["last_focused_pane_id"] = "w1:p2"
+        state["panes"] = {
+            "w1:p1": {
+                "workspace_id": "w1",
+                "tab_id": "w1:t1",
+                "agent": "codex",
+                "cwd": "/repo",
+                "input_source_id": "com.apple.keylayout.ABC",
+                "updated_at": "2026-06-18T12:00:00+00:00",
+            },
+            "w1:p2": {
+                "workspace_id": "w1",
+                "tab_id": "w1:t2",
+                "agent": "claude",
+                "cwd": "/repo/cn",
+                "input_source_id": "com.tencent.inputmethod.wetype.pinyin",
+                "updated_at": "2026-06-18T12:01:00+00:00",
+            },
+        }
+        store.save(state)
+        store.session_dir.mkdir(parents=True, exist_ok=True)
+        store.focus_log_path.write_text("focus-tail-entry\n", encoding="utf-8")
+        herdr = FakeHerdr([])
+        herdr.workspaces = [
+            {
+                "workspace_id": "w1",
+                "label": "repo",
+                "number": 1,
+                "focused": True,
+                "active_tab_id": "w1:t2",
+            }
+        ]
+        herdr.tabs = [
+            {"workspace_id": "w1", "tab_id": "w1:t1", "label": "en", "number": 1},
+            {"workspace_id": "w1", "tab_id": "w1:t2", "label": "cn", "number": 2},
+        ]
+        herdr.panes = [
+            {
+                "workspace_id": "w1",
+                "tab_id": "w1:t2",
+                "pane_id": "w1:p2",
+                "focused": True,
+                "custom_status": "IME pinyin",
+                "agent": "claude",
+                "agent_status": "working",
+                "cwd": "/repo/cn",
+            }
+        ]
+        stdout = io.StringIO()
+
+        with contextlib.redirect_stdout(stdout):
+            code = ime_keeper.main(
+                ["dashboard", "--once"],
+                env=self.env,
+                backend=FakeBackend(["com.tencent.inputmethod.wetype.pinyin"]),
+                herdr=herdr,
+            )
+
+        output = stdout.getvalue()
+        self.assertEqual(code, 0)
+        self.assertIn("Input Method Keeper Dashboard", output)
+        self.assertIn("session=work", output)
+        self.assertIn("enabled=on debug=on action=keep backend=macism", output)
+        self.assertIn("default=ABC current=pinyin", output)
+        self.assertIn("* workspace 1 repo w1 active=w1:t2", output)
+        self.assertIn("* tab 2 cn w1:t2", output)
+        self.assertIn("* p2   live       stored=pinyin", output)
+        self.assertIn("status=IME pinyin", output)
+        self.assertIn("p1   state-only stored=ABC", output)
+        self.assertIn("focus-tail-entry", output)
+
+    def test_set_backend_helper_and_macism_write_backend_config(self):
+        self.write_config()
+
+        self.assertEqual(
+            ime_keeper.main(["set-backend-helper"], env=self.env, backend=FakeBackend(["abc"])),
+            0,
+        )
+        helper_config = ime_keeper.load_config(self.config_dir, readonly=True)
+        self.assertEqual(helper_config["backend"]["name"], "herdr-ime-helper")
+        self.assertEqual(helper_config["backend"]["current_args"], ["current"])
+        self.assertEqual(
+            helper_config["backend"]["select_args"],
+            ["select", "{id}", "--refresh", "--wait-ms", "150"],
+        )
+        self.assertTrue(helper_config["backend"]["executable_candidates"][0].endswith("/bin/herdr-ime-helper"))
+
+        self.assertEqual(
+            ime_keeper.main(["set-backend-macism"], env=self.env, backend=FakeBackend(["abc"])),
+            0,
+        )
+        macism_config = ime_keeper.load_config(self.config_dir, readonly=True)
+        self.assertEqual(macism_config["backend"]["name"], "macism")
+        self.assertEqual(macism_config["backend"]["current_args"], [])
+        self.assertEqual(macism_config["backend"]["select_args"], ["{id}"])
 
     def test_doctor_does_not_select_by_default(self):
         self.write_config()
