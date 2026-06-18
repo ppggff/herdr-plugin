@@ -1138,6 +1138,20 @@ context.
   source changes in real time and associating them with the currently focused
   Herdr pane.
 
+## Future Ideas
+
+- A simple TUI settings pane could build on the dashboard once the current
+  behavior has been used for a while. Keep it as a settings and explicit-action
+  surface, not a replacement for the automatic focus handler.
+- Candidate TUI operations: toggle debug, switch backend, set default input
+  source, set default action, inspect/focus a pane, and possibly reset selected
+  pane state.
+- Keep the compact read-only dashboard as the low-risk default. Avoid adding a
+  heavy dependency or reviving the rule engine just to support the TUI.
+- If the TUI can focus another pane, expect the settings pane to lose keyboard
+  focus after that operation. That behavior is acceptable and should be designed
+  deliberately.
+
 ## Implementation Order
 
 1. Add manifest, `bin/ime-keeper` wrapper, default config example, and
