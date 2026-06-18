@@ -839,11 +839,14 @@ Rendered output should stay compact enough for one screen. Header details are
 limited to the current session, enabled/debug/action, default/current input
 source, backend name, and live/state pane counts. Workspace and tab labels give
 context, and panes render as only `pane-id=status`. Use `>` as the focused
-marker for workspace, tab, and pane. Render tabs as `tab <number> [<label>]` so
-numeric tab labels are not confused with tab numbers. The focused marker should
-be colored in color mode, and selected workspace/tab/pane labels should use
-colored brackets. Do not use ANSI background or inverse-video styles. Do not
-render focus log tails, cwd, agent, or update timestamps in the dashboard.
+marker for workspace, tab, and pane. Render workspace and tab labels in
+parentheses, for example `workspace 5 (hatch-deck)` and `tab 4 (4)`, so numeric
+tab labels are not confused with tab numbers. Header/status lines must remain
+plain text even in color mode. In color mode, only the focused marker is colored
+for workspace and tab; the focused pane id uses square brackets with the same
+color as the marker. Stored state uses the muted timestamp color. Do not use
+ANSI background or inverse-video styles. Do not render focus log tails, cwd,
+agent, or update timestamps in the dashboard.
 
 Color is ANSI-only and dependency-free. `--color auto` is the default: enable
 color when stdout is a TTY, disable it for pipes/tests, disable it when

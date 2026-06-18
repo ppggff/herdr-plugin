@@ -1723,29 +1723,11 @@ class DashboardStyle:
             return text
         return f"\033[{code}m{text}\033[0m"
 
-    def title(self, text: str) -> str:
-        return self._wrap(text, "1;34")
-
-    def key(self, text: str) -> str:
-        return self._wrap(text, "2")
-
-    def ok(self, text: str) -> str:
-        return self._wrap(text, "32")
-
-    def warn(self, text: str) -> str:
-        return self._wrap(text, "35")
-
-    def accent(self, text: str) -> str:
-        return self._wrap(text, "34")
-
     def stored(self, text: str) -> str:
-        return self._wrap(text, "2;36")
+        return self.muted(text)
 
     def marker(self, text: str) -> str:
         return self._wrap(text, "1;34")
-
-    def selected(self, text: str) -> str:
-        return self._wrap(text, "1;36")
 
     def live(self, text: str) -> str:
         return self._wrap(text, "32")
@@ -1766,23 +1748,23 @@ def dashboard_color_enabled(env: Mapping[str, str], mode: str) -> bool:
     return sys.stdout.isatty()
 
 
-def dashboard_setting(label: str, value: str, style: DashboardStyle) -> str:
-    return f"{style.key(label)}={value}"
+def dashboard_plain_setting(label: str, value: str) -> str:
+    return f"{label}={value}"
 
 
 def dashboard_marker(active: bool, style: DashboardStyle) -> str:
     return style.marker(">") if active else " "
 
 
-def dashboard_selected_label(value: Any, active: bool, style: DashboardStyle) -> str:
+def dashboard_pane_label(value: Any, active: bool, style: DashboardStyle) -> str:
     text = str(value)
-    label = f"[{text}]" if active else text
-    return style.selected(label) if active else label
+    if not active:
+        return text
+    return f"{style.marker('[')}{text}{style.marker(']')}"
 
 
-def dashboard_tab_label(value: Any, active: bool, style: DashboardStyle) -> str:
-    label = f"[{value}]"
-    return style.selected(label) if active else label
+def dashboard_paren_label(value: Any) -> str:
+    return f"({value})"
 
 
 def tab_sort_key(tab_id: str, tab_by_id: Mapping[str, Mapping[str, Any]]) -> Tuple[int, str]:
@@ -1827,7 +1809,7 @@ def dashboard_pane_token(
 ) -> str:
     local_pane_id, _workspace_id = pane_parts(pane_id)
     focused = bool(isinstance(live, Mapping) and live.get("focused"))
-    pane_label = dashboard_selected_label(local_pane_id, focused, style)
+    pane_label = dashboard_pane_label(local_pane_id, focused, style)
     text = f"{pane_label}={dashboard_pane_status(live, pane_state, style)}"
     if focused:
         return f"{dashboard_marker(True, style)}{text}"
@@ -1947,23 +1929,19 @@ def render_dashboard(data: Mapping[str, Any], color_enabled: bool = False) -> st
     session_label = getattr(identity, "label", "-")
     live_count = len(panes)
     state_count = len(state_panes)
-    enabled_value = (
-        style.ok("on") if bool(config.get("enabled")) else style.warn("off")
-    )
-    debug_value = style.warn("on") if bool(config.get("debug")) else style.muted("off")
     lines = [
         (
-            f"{style.title('IME Keeper')} {style.muted(now)} "
-            f"{dashboard_setting('session', session_label, style)} "
-            f"{dashboard_setting('enabled', enabled_value, style)} "
-            f"{dashboard_setting('debug', debug_value, style)} "
-            f"{dashboard_setting('action', str(config.get('default_action', '-')), style)}"
+            f"IME Keeper {now} "
+            f"{dashboard_plain_setting('session', session_label)} "
+            f"{dashboard_plain_setting('enabled', display_bool(config.get('enabled')))} "
+            f"{dashboard_plain_setting('debug', display_bool(config.get('debug')))} "
+            f"{dashboard_plain_setting('action', str(config.get('default_action', '-')))}"
         ),
         (
-            f"{dashboard_setting('default', style.accent(display_source(config.get('default_input_source'))), style)} "
-            f"{dashboard_setting('current', style.accent(display_source(data.get('current_input_source'))), style)} "
-            f"{dashboard_setting('backend', str(backend.get('name') or '-'), style)} "
-            f"{dashboard_setting('panes', f'live:{live_count}/state:{state_count}', style)}"
+            f"{dashboard_plain_setting('default', display_source(config.get('default_input_source')))} "
+            f"{dashboard_plain_setting('current', display_source(data.get('current_input_source')))} "
+            f"{dashboard_plain_setting('backend', str(backend.get('name') or '-'))} "
+            f"{dashboard_plain_setting('panes', f'live:{live_count}/state:{state_count}')}"
         ),
     ]
     if diagnostics:
@@ -1979,10 +1957,9 @@ def render_dashboard(data: Mapping[str, Any], color_enabled: bool = False) -> st
         workspace_marker = dashboard_marker(workspace_focused, style)
         workspace_number = workspace.get("number", "-")
         active_tab_id = workspace.get("active_tab_id", "-")
-        workspace_label_text = dashboard_selected_label(
-            workspace_label, workspace_focused, style
+        lines.append(
+            f"{workspace_marker} workspace {workspace_number} {dashboard_paren_label(workspace_label)}"
         )
-        lines.append(f"{workspace_marker} ws {workspace_number} {workspace_label_text}")
         tab_ids = tab_ids_by_workspace.get(workspace_id, set())
         if not tab_ids:
             lines.append("    (no panes)")
@@ -2003,7 +1980,7 @@ def render_dashboard(data: Mapping[str, Any], color_enabled: bool = False) -> st
                 if not isinstance(pane_state, Mapping):
                     pane_state = {}
                 pane_tokens.append(dashboard_pane_token(pane_id, live, pane_state, style))
-            tab_label_text = dashboard_tab_label(tab_label, tab_focused, style)
+            tab_label_text = dashboard_paren_label(tab_label)
             tab_head = f"  {tab_marker} tab {tab_number} {tab_label_text}: "
             lines.append(tab_head + ", ".join(pane_tokens))
     return "\n".join(lines)

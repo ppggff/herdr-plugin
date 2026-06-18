@@ -569,9 +569,9 @@ class CliTests(TempEnvTest):
         self.assertIn("session=work enabled=on debug=on action=keep", output)
         self.assertIn("default=ABC current=pinyin", output)
         self.assertIn("backend=macism panes=live:1/state:2", output)
-        self.assertIn("> ws 1 [repo]", output)
-        self.assertIn("> tab 2 [cn]: >[p2]=IME pinyin", output)
-        self.assertIn("tab 1 [en]: p1=stored ABC", output)
+        self.assertIn("> workspace 1 (repo)", output)
+        self.assertIn("> tab 2 (cn): >[p2]=IME pinyin", output)
+        self.assertIn("tab 1 (en): p1=stored ABC", output)
         self.assertNotIn("focus-tail-entry", output)
         self.assertNotIn("focus.log tail", output)
         self.assertNotIn("cwd=", output)
@@ -591,6 +591,13 @@ class CliTests(TempEnvTest):
         color_output = color_stdout.getvalue()
         self.assertIn("\033[", color_output)
         self.assertNotIn(";7", color_output)
+        first_two_lines = "\n".join(color_output.splitlines()[:2])
+        self.assertNotIn("\033[", first_two_lines)
+        self.assertIn(
+            "\033[1;34m>\033[0m\033[1;34m[\033[0mp2\033[1;34m]\033[0m=\033[32mIME pinyin\033[0m",
+            color_output,
+        )
+        self.assertIn("p1=\033[2mstored ABC\033[0m", color_output)
 
     def test_set_backend_helper_and_macism_write_backend_config(self):
         self.write_config()

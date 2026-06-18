@@ -156,13 +156,15 @@ input-method-keeper/bin/ime-keeper dashboard --once --color never
 ```
 
 The dashboard uses foreground colors only, with no background or inverse color.
-`>` marks the focused workspace, active tab, or focused pane; in color mode the
-marker is colored. Selected workspace/tab/pane labels use colored brackets.
-Tab rows use `tab <number> [<label>]`, for example:
+The two header/status lines are always plain text. `>` marks the focused
+workspace, active tab, or focused pane; in color mode only that marker is
+colored for workspace and tab. Workspace and tab labels use parentheses. The
+focused pane id uses colored square brackets, and `stored ...` uses the same
+muted color as the timestamp.
 
 ```text
-> ws 5 [hatch-deck]
-  > tab 4 [4]: >[p6]=IME ABC, p1=stored pinyin
+> workspace 5 (hatch-deck)
+  > tab 4 (4): >[p6]=IME ABC, p1=stored pinyin
 ```
 
 The dashboard pane is not special-cased by the plugin. It is handled like any
