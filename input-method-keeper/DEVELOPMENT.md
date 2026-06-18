@@ -840,8 +840,10 @@ limited to the current session, enabled/debug/action, default/current input
 source, backend name, and live/state pane counts. Workspace and tab labels give
 context, and panes render as only `pane-id=status`. Use `>` as the focused
 marker for workspace, tab, and pane. Render tabs as `tab <number> [<label>]` so
-numeric tab labels are not confused with tab numbers. Do not render focus log
-tails, cwd, agent, or update timestamps in the dashboard.
+numeric tab labels are not confused with tab numbers. The focused marker should
+be colored in color mode, and selected workspace/tab/pane labels should use
+colored brackets. Do not use ANSI background or inverse-video styles. Do not
+render focus log tails, cwd, agent, or update timestamps in the dashboard.
 
 Color is ANSI-only and dependency-free. `--color auto` is the default: enable
 color when stdout is a TTY, disable it for pipes/tests, disable it when

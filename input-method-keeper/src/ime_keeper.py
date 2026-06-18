@@ -1724,7 +1724,7 @@ class DashboardStyle:
         return f"\033[{code}m{text}\033[0m"
 
     def title(self, text: str) -> str:
-        return self._wrap(text, "1;36")
+        return self._wrap(text, "1;34")
 
     def key(self, text: str) -> str:
         return self._wrap(text, "2")
@@ -1733,16 +1733,19 @@ class DashboardStyle:
         return self._wrap(text, "32")
 
     def warn(self, text: str) -> str:
-        return self._wrap(text, "33")
+        return self._wrap(text, "35")
 
     def accent(self, text: str) -> str:
-        return self._wrap(text, "36")
+        return self._wrap(text, "34")
 
     def stored(self, text: str) -> str:
-        return self._wrap(text, "2;33")
+        return self._wrap(text, "2;36")
 
-    def focused(self, text: str) -> str:
-        return self._wrap(text, "1;7")
+    def marker(self, text: str) -> str:
+        return self._wrap(text, "1;34")
+
+    def selected(self, text: str) -> str:
+        return self._wrap(text, "1;36")
 
     def live(self, text: str) -> str:
         return self._wrap(text, "32")
@@ -1765,6 +1768,21 @@ def dashboard_color_enabled(env: Mapping[str, str], mode: str) -> bool:
 
 def dashboard_setting(label: str, value: str, style: DashboardStyle) -> str:
     return f"{style.key(label)}={value}"
+
+
+def dashboard_marker(active: bool, style: DashboardStyle) -> str:
+    return style.marker(">") if active else " "
+
+
+def dashboard_selected_label(value: Any, active: bool, style: DashboardStyle) -> str:
+    text = str(value)
+    label = f"[{text}]" if active else text
+    return style.selected(label) if active else label
+
+
+def dashboard_tab_label(value: Any, active: bool, style: DashboardStyle) -> str:
+    label = f"[{value}]"
+    return style.selected(label) if active else label
 
 
 def tab_sort_key(tab_id: str, tab_by_id: Mapping[str, Mapping[str, Any]]) -> Tuple[int, str]:
@@ -1808,9 +1826,11 @@ def dashboard_pane_token(
     style: DashboardStyle,
 ) -> str:
     local_pane_id, _workspace_id = pane_parts(pane_id)
-    text = f"{local_pane_id}={dashboard_pane_status(live, pane_state, style)}"
-    if isinstance(live, Mapping) and live.get("focused"):
-        return style.focused(f">{text}")
+    focused = bool(isinstance(live, Mapping) and live.get("focused"))
+    pane_label = dashboard_selected_label(local_pane_id, focused, style)
+    text = f"{pane_label}={dashboard_pane_status(live, pane_state, style)}"
+    if focused:
+        return f"{dashboard_marker(True, style)}{text}"
     return text
 
 
@@ -1955,11 +1975,14 @@ def render_dashboard(data: Mapping[str, Any], color_enabled: bool = False) -> st
     for workspace_id in sorted(workspace_ids, key=lambda item: workspace_sort_key(item, workspace_by_id)):
         workspace = workspace_by_id.get(workspace_id, {})
         workspace_label = workspace.get("label") or workspace_id
-        workspace_marker = ">" if workspace.get("focused") else " "
+        workspace_focused = bool(workspace.get("focused"))
+        workspace_marker = dashboard_marker(workspace_focused, style)
         workspace_number = workspace.get("number", "-")
         active_tab_id = workspace.get("active_tab_id", "-")
-        workspace_line = f"{workspace_marker} ws {workspace_number} {workspace_label}"
-        lines.append(style.focused(workspace_line) if workspace.get("focused") else workspace_line)
+        workspace_label_text = dashboard_selected_label(
+            workspace_label, workspace_focused, style
+        )
+        lines.append(f"{workspace_marker} ws {workspace_number} {workspace_label_text}")
         tab_ids = tab_ids_by_workspace.get(workspace_id, set())
         if not tab_ids:
             lines.append("    (no panes)")
@@ -1967,7 +1990,7 @@ def render_dashboard(data: Mapping[str, Any], color_enabled: bool = False) -> st
         for tab_id in sorted(tab_ids, key=lambda item: tab_sort_key(item, tab_by_id)):
             tab = tab_by_id.get(tab_id, {})
             tab_focused = bool(tab.get("focused") or active_tab_id == tab_id)
-            tab_marker = ">" if tab_focused else " "
+            tab_marker = dashboard_marker(tab_focused, style)
             tab_label = tab.get("label") or tab_id.rsplit(":", 1)[-1]
             tab_number = tab.get("number", "-")
             pane_ids = pane_ids_by_tab.get(tab_id, set())
@@ -1980,9 +2003,8 @@ def render_dashboard(data: Mapping[str, Any], color_enabled: bool = False) -> st
                 if not isinstance(pane_state, Mapping):
                     pane_state = {}
                 pane_tokens.append(dashboard_pane_token(pane_id, live, pane_state, style))
-            tab_head = f"  {tab_marker} tab {tab_number} [{tab_label}]: "
-            if tab_focused:
-                tab_head = style.focused(tab_head)
+            tab_label_text = dashboard_tab_label(tab_label, tab_focused, style)
+            tab_head = f"  {tab_marker} tab {tab_number} {tab_label_text}: "
             lines.append(tab_head + ", ".join(pane_tokens))
     return "\n".join(lines)
 
