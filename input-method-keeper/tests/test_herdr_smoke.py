@@ -1,8 +1,6 @@
 import importlib.util
 import io
 import json
-import shlex
-import subprocess
 import sys
 import unittest
 import contextlib
@@ -132,48 +130,40 @@ class StateBackupTests(unittest.TestCase):
             self.assertEqual(target.read_bytes(), b"restored")
             self.assertFalse((Path(temp_dir) / "state.json.restore-tmp").exists())
 
-    def test_restore_state_from_pane_replays_backup_payload(self):
+    def test_state_restore_preflight_checks_write_and_delete_permissions(self):
         with TemporaryDirectory() as temp_dir:
             state_dir = Path(temp_dir)
             session_a = state_dir / "sessions" / "default-a"
-            session_b = state_dir / "sessions" / "default-b"
+            session_a.mkdir(parents=True)
+            state_path = session_a / "state.json"
+            state_path.write_text('{"panes":{"p1":{}}}\n', encoding="utf-8")
+            backup = herdr_smoke.backup_state(state_dir)
+
+            herdr_smoke.assert_state_restore_writable(backup)
+
+            self.assertEqual(state_path.read_text(encoding="utf-8"), '{"panes":{"p1":{}}}\n')
+            self.assertFalse(list((state_dir / "sessions").glob(".smoke-restore-probe-*")))
+
+    def test_state_restore_preflight_fails_before_destructive_actions_when_unwritable(self):
+        with TemporaryDirectory() as temp_dir:
+            state_dir = Path(temp_dir)
+            session_a = state_dir / "sessions" / "default-a"
             session_a.mkdir(parents=True)
             (session_a / "state.json").write_text('{"panes":{"p1":{}}}\n', encoding="utf-8")
             backup = herdr_smoke.backup_state(state_dir)
-            (session_a / "state.json").write_text('{"panes":{"p2":{}}}\n', encoding="utf-8")
-            session_b.mkdir()
-            (session_b / "state.json").write_text('{"panes":{"test":{}}}\n', encoding="utf-8")
+            original_write_state_backup_file = herdr_smoke.write_state_backup_file
 
-            original_current_pane = herdr_smoke.current_pane
-            original_herdr = herdr_smoke.herdr
-            calls = []
-
-            def fake_current_pane(session):
-                return {"pane_id": "pane-1"}
-
-            def fake_herdr(args, session=None, check=True, echo=True):
-                calls.append(list(args))
-                if args[:2] == ["pane", "run"]:
-                    subprocess.run(
-                        shlex.split(args[3]),
-                        check=True,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
-                    )
-                return herdr_smoke.Command(list(args), json.dumps({"result": {}}), "", 0)
+            def fake_write_state_backup_file(path, data):
+                raise PermissionError("denied")
 
             try:
-                herdr_smoke.current_pane = fake_current_pane
-                herdr_smoke.herdr = fake_herdr
-                herdr_smoke.restore_state_from_pane(backup, None)
+                herdr_smoke.write_state_backup_file = fake_write_state_backup_file
+                with self.assertRaises(herdr_smoke.SmokeFailure) as caught:
+                    herdr_smoke.assert_state_restore_writable(backup)
             finally:
-                herdr_smoke.current_pane = original_current_pane
-                herdr_smoke.herdr = original_herdr
+                herdr_smoke.write_state_backup_file = original_write_state_backup_file
 
-            self.assertEqual((session_a / "state.json").read_text(encoding="utf-8"), '{"panes":{"p1":{}}}\n')
-            self.assertFalse((session_b / "state.json").exists())
-            self.assertEqual(calls[0][:3], ["pane", "run", "pane-1"])
-            self.assertEqual(calls[1][:2], ["wait", "output"])
+            self.assertIn("state restore preflight failed", str(caught.exception))
 
 
 class ManifestCoverageTests(unittest.TestCase):

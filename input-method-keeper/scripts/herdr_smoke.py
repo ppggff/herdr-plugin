@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import plistlib
@@ -372,96 +371,39 @@ def restore_state(backup: StateBackup) -> None:
     log(f"state backup restored: {backup.state_dir} ({len(backup.files)} files)")
 
 
-def restore_state_from_pane(backup: StateBackup, session: Optional[str]) -> None:
-    pane = current_pane(session)
-    pane_id = pane.get("pane_id")
-    if not isinstance(pane_id, str) or not pane_id:
-        raise SmokeFailure("could not find a pane for state restore fallback")
-
-    token = f"IME_KEEPER_STATE_RESTORED_{os.getpid()}_{int(time.time() * 1000)}"
-    payload_path = Path("/tmp") / f"ime-keeper-state-restore-{os.getpid()}-{token}.json"
-    script_path = Path("/tmp") / f"ime-keeper-state-restore-{os.getpid()}-{token}.py"
-    payload = {
-        "state_dir": str(backup.state_dir),
-        "files": {
-            relative.as_posix(): base64.b64encode(data).decode("ascii")
-            for relative, data in backup.files.items()
-        },
-    }
-    payload_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    script_path.write_text(
-        """#!/usr/bin/env python3
-import base64
-import json
-import sys
-from pathlib import Path
-
-payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-state_dir = Path(payload["state_dir"])
-files = payload["files"]
-sessions_dir = state_dir / "sessions"
-if sessions_dir.exists():
-    for session_dir in sessions_dir.iterdir():
-        if not session_dir.is_dir():
-            continue
-        for name in ("state.json", "focus.dirty"):
-            path = session_dir / name
-            if path.exists() and path.relative_to(state_dir).as_posix() not in files:
-                path.unlink()
-for relative, encoded in files.items():
-    relative_path = Path(relative)
-    if relative_path.is_absolute() or ".." in relative_path.parts:
-        raise SystemExit(f"unsafe state backup path: {relative}")
-    path = state_dir / relative_path
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(base64.b64decode(encoded))
-print(sys.argv[2])
-""",
-        encoding="utf-8",
-    )
-    restore_command = " ".join(
-        [
-            "python3",
-            shlex.quote(str(script_path)),
-            shlex.quote(str(payload_path)),
-            token,
-        ]
-    )
-    try:
-        herdr(
-            ["pane", "run", pane_id, restore_command],
-            session=session,
-            echo=False,
-        )
-        herdr(
-            ["wait", "output", pane_id, "--match", f"^{token}$", "--regex", "--timeout", "5000"],
-            session=session,
-            echo=False,
-        )
-    finally:
+def assert_state_restore_writable(backup: StateBackup) -> None:
+    failures = []
+    for relative, data in backup.files.items():
+        path = backup.state_dir / relative
         try:
-            payload_path.unlink()
-        except FileNotFoundError:
-            pass
-        try:
-            script_path.unlink()
-        except FileNotFoundError:
-            pass
-    log(f"state backup restored via pane fallback: {backup.state_dir} ({len(backup.files)} files)")
-
-
-def restore_state_for_smoke(backup: StateBackup, session: Optional[str]) -> None:
+            write_state_backup_file(path, data)
+        except Exception as exc:
+            failures.append(f"{relative}: {exc}")
+    probe_dir = backup.state_dir / "sessions" / f".smoke-restore-probe-{os.getpid()}-{int(time.time() * 1000)}"
+    probe_path = probe_dir / "state.json"
     try:
-        restore_state(backup)
+        write_state_backup_file(probe_path, b"{}\n")
+        probe_path.unlink()
+        probe_dir.rmdir()
     except Exception as exc:
-        log(f"warning: direct state restore failed; trying pane fallback: {exc}")
-        restore_state_from_pane(backup, session)
+        failures.append(f"{probe_path.relative_to(backup.state_dir)}: {exc}")
+        try:
+            probe_path.unlink()
+        except FileNotFoundError:
+            pass
+        try:
+            probe_dir.rmdir()
+        except OSError:
+            pass
+    if failures:
+        raise SmokeFailure("state restore preflight failed: " + "; ".join(failures))
 
 
 def action_smoke(plugin_id: str, session: Optional[str]) -> StateBackup:
     assert_actions(plugin_id, session)
     status_log = invoke_action(plugin_id, "status", session)
     state_backup = backup_state(state_dir_from_status(action_stdout_json(status_log, "status")))
+    assert_state_restore_writable(state_backup)
     invoke_action(plugin_id, "doctor", session)
     return state_backup
 
@@ -1296,7 +1238,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             except SmokeFailure as exc:
                 log(f"warning: restoring state while plugin may still be active: {exc}")
             try:
-                restore_state_for_smoke(state_backup, args.session)
+                restore_state(state_backup)
             except Exception as exc:
                 log(f"warning: failed to restore state backup: {exc}")
                 exit_code = 1
