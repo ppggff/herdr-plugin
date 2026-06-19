@@ -29,19 +29,38 @@ mkdir -p "$BUILD_DIR"
 if [ ! -x "$BIN" ] || [ "$SRC" -nt "$BIN" ]; then
   LOCK_DIR="$BUILD_DIR/.compile.lock"
   LOCK_START=$(date +%s)
+  lock_mtime() {
+    stat -f %m "$LOCK_DIR" 2>/dev/null || stat -c %Y "$LOCK_DIR" 2>/dev/null || printf '0\n'
+  }
   while ! mkdir "$LOCK_DIR" 2>/dev/null; do
     NOW=$(date +%s)
+    LOCK_PID=$(cat "$LOCK_DIR/pid" 2>/dev/null || true)
+    LOCK_CREATED=$(cat "$LOCK_DIR/created_at" 2>/dev/null || true)
+    case "$LOCK_CREATED" in
+      ''|*[!0-9]*) LOCK_CREATED=$(lock_mtime) ;;
+    esac
+    if [ -n "$LOCK_PID" ] && ! kill -0 "$LOCK_PID" 2>/dev/null; then
+      rm -rf "$LOCK_DIR"
+      continue
+    fi
+    if [ -z "$LOCK_PID" ] && [ "$LOCK_CREATED" -gt 0 ] && [ $((NOW - LOCK_CREATED)) -gt 30 ]; then
+      rm -rf "$LOCK_DIR"
+      continue
+    fi
     if [ $((NOW - LOCK_START)) -gt 30 ]; then
       printf '%s\n' "herdr-ime-helper: timed out waiting for compile lock: $LOCK_DIR" >&2
       exit 1
     fi
     sleep 0.05
   done
+  printf '%s\n' "$$" > "$LOCK_DIR/pid"
+  printf '%s\n' "$(date +%s)" > "$LOCK_DIR/created_at"
   TMP_BIN=""
   cleanup() {
     if [ -n "$TMP_BIN" ]; then
       rm -f "$TMP_BIN"
     fi
+    rm -f "$LOCK_DIR/pid" "$LOCK_DIR/created_at"
     rmdir "$LOCK_DIR" 2>/dev/null || true
   }
   trap cleanup EXIT HUP INT TERM

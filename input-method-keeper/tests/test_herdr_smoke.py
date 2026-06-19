@@ -1,6 +1,8 @@
 import importlib.util
 import io
 import json
+import os
+import subprocess
 import sys
 import unittest
 import contextlib
@@ -98,7 +100,7 @@ class PluginLogWaitTests(unittest.TestCase):
             herdr_smoke.plugin_logs = fake_plugin_logs
 
             event = herdr_smoke.wait_for_event_after(
-                "local.input-method-keeper",
+                "ppggff.input-method-keeper",
                 "pane.focused",
                 {"old"},
                 None,
@@ -142,12 +144,12 @@ class StateBackupTests(unittest.TestCase):
 
     def test_session_dir_from_status_uses_focus_log_parent(self):
         status = {
-            "focus_log_path": "/tmp/herdr/plugins/local.input-method-keeper/sessions/default/focus.log"
+            "focus_log_path": "/tmp/herdr/plugins/ppggff.input-method-keeper/sessions/default/focus.log"
         }
 
         self.assertEqual(
             herdr_smoke.session_dir_from_status(status),
-            Path("/tmp/herdr/plugins/local.input-method-keeper/sessions/default"),
+            Path("/tmp/herdr/plugins/ppggff.input-method-keeper/sessions/default"),
         )
 
     def test_write_state_backup_file_falls_back_when_tmp_write_is_denied(self):
@@ -203,6 +205,90 @@ class StateBackupTests(unittest.TestCase):
                 herdr_smoke.write_state_backup_file = original_write_state_backup_file
 
             self.assertIn("state restore preflight failed", str(caught.exception))
+
+
+class ConfigWriteTests(unittest.TestCase):
+    def test_write_config_for_smoke_does_not_fallback_to_pane_on_permission_error(self):
+        original_write_config = herdr_smoke.write_config
+
+        def fake_write_config(path, config):
+            raise PermissionError("denied")
+
+        try:
+            herdr_smoke.write_config = fake_write_config
+
+            with self.assertRaises(PermissionError):
+                herdr_smoke.write_config_for_smoke(Path("/tmp/config.json"), {"enabled": True})
+        finally:
+            herdr_smoke.write_config = original_write_config
+
+    def test_restore_config_for_smoke_does_not_fallback_to_pane_on_permission_error(self):
+        original_restore_config = herdr_smoke.restore_config
+
+        def fake_restore_config(path, data):
+            raise PermissionError("denied")
+
+        try:
+            herdr_smoke.restore_config = fake_restore_config
+
+            with self.assertRaises(PermissionError):
+                herdr_smoke.restore_config_for_smoke(Path("/tmp/config.json"), b"{}")
+        finally:
+            herdr_smoke.restore_config = original_restore_config
+
+
+class HelperWrapperTests(unittest.TestCase):
+    def test_helper_recovers_stale_pidless_compile_lock(self):
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            fake_swiftc = temp_path / "swiftc"
+            fake_swiftc.write_text(
+                """#!/bin/sh
+set -eu
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    shift
+    out="$1"
+  fi
+  shift || true
+done
+if [ -z "$out" ]; then
+  printf '%s\\n' 'missing -o' >&2
+  exit 2
+fi
+cat > "$out" <<'BIN'
+#!/bin/sh
+case "${1:-}" in
+  current) printf '%s\\n' 'fake.current' ;;
+  *) printf '%s\\n' "fake ${1:-}" ;;
+esac
+BIN
+chmod +x "$out"
+""",
+                encoding="utf-8",
+            )
+            fake_swiftc.chmod(0o755)
+            state_dir = temp_path / "state"
+            lock_dir = state_dir / "helper-build" / ".compile.lock"
+            lock_dir.mkdir(parents=True)
+            os.utime(lock_dir, (946684800, 946684800))
+
+            env = os.environ.copy()
+            env["HERDR_PLUGIN_STATE_DIR"] = str(state_dir)
+            env["HERDR_IME_HELPER_SWIFTC"] = str(fake_swiftc)
+            result = subprocess.run(
+                [str(ROOT / "bin" / "herdr-ime-helper"), "current"],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "fake.current\n")
+            self.assertFalse(lock_dir.exists())
+            self.assertTrue((state_dir / "helper-build" / "herdr-ime-helper").is_file())
 
 
 class ManifestCoverageTests(unittest.TestCase):

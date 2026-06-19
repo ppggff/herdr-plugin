@@ -16,7 +16,7 @@ from tempfile import TemporaryDirectory
 from typing import Any, Callable, Iterable, Optional
 
 
-PLUGIN_ID = "local.input-method-keeper"
+PLUGIN_ID = "ppggff.input-method-keeper"
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PLUGIN_PATH = ROOT
 REQUIRED_ACTIONS = {
@@ -696,81 +696,12 @@ def write_config(path: Path, config: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
-def write_config_from_pane(
-    pane_id: str,
-    session: Optional[str],
-    config_path: Path,
-    config: Optional[dict[str, Any]],
-    raw_backup: Optional[bytes],
-) -> None:
-    token = f"IME_KEEPER_CONFIG_DONE_{int(time.time() * 1000)}"
-    payload_path = Path("/tmp") / f"ime-keeper-config-{os.getpid()}-{token}.json"
-    script_path = Path("/tmp") / f"ime-keeper-config-writer-{os.getpid()}.py"
-    if config is None:
-        if raw_backup is not None:
-            payload_path.write_bytes(raw_backup)
-        mode = "restore-bytes"
-    else:
-        payload_path.write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        mode = "write-json"
-    script = (
-        "from pathlib import Path; import shutil; "
-        f"target=Path({str(config_path)!r}); target.parent.mkdir(parents=True, exist_ok=True); "
-    )
-    if mode == "restore-bytes" or mode == "write-json":
-        script += f"shutil.copyfile({str(payload_path)!r}, target); "
-    else:
-        script += "target.unlink(missing_ok=True); "
-    if config is None and raw_backup is None:
-        script = (
-            "from pathlib import Path; "
-            f"target=Path({str(config_path)!r}); target.unlink(missing_ok=True); "
-        )
-    script += f"print({token!r})"
-    script_path.write_text(script, encoding="utf-8")
-    command = f"python3 {shlex.quote(str(script_path))}"
-    herdr(["pane", "run", pane_id, command], session=session, echo=False)
-    herdr(
-        ["wait", "output", pane_id, "--match", f"^{token}$", "--regex", "--timeout", "5000"],
-        session=session,
-        echo=False,
-    )
-    try:
-        payload_path.unlink()
-    except FileNotFoundError:
-        pass
-    try:
-        script_path.unlink()
-    except FileNotFoundError:
-        pass
+def write_config_for_smoke(config_path: Path, config: dict[str, Any]) -> None:
+    write_config(config_path, config)
 
 
-def write_config_for_smoke(
-    config_path: Path,
-    config: dict[str, Any],
-    pane_id: Optional[str],
-    session: Optional[str],
-) -> None:
-    try:
-        write_config(config_path, config)
-    except PermissionError:
-        if not pane_id:
-            raise
-        write_config_from_pane(pane_id, session, config_path, config, None)
-
-
-def restore_config_for_smoke(
-    config_path: Path,
-    raw_backup: Optional[bytes],
-    pane_id: Optional[str],
-    session: Optional[str],
-) -> None:
-    try:
-        restore_config(config_path, raw_backup)
-    except PermissionError:
-        if not pane_id:
-            raise
-        write_config_from_pane(pane_id, session, config_path, None, raw_backup)
+def restore_config_for_smoke(config_path: Path, raw_backup: Optional[bytes]) -> None:
+    restore_config(config_path, raw_backup)
 
 
 def fake_backend_script(path: Path) -> None:
@@ -993,7 +924,7 @@ def full_ime_e2e(
             except Exception as exc:
                 log(f"warning: failed to restore original input source {original_source}: {exc}")
         if config_path:
-            restore_config_for_smoke(config_path, config_backup, pane_a, session)
+            restore_config_for_smoke(config_path, config_backup)
         if workspace_id:
             herdr(["workspace", "close", workspace_id], session=session, check=False, echo=False)
 
@@ -1029,8 +960,6 @@ def fake_backend_e2e(plugin_id: str, session: Optional[str]) -> None:
         write_config_for_smoke(
             config_path,
             fake_backend_config(backend_path, source_path, source_a),
-            pane_a,
-            session,
         )
 
         def select_fake(input_source: str) -> None:
@@ -1060,7 +989,7 @@ def fake_backend_e2e(plugin_id: str, session: Optional[str]) -> None:
             log("fake backend Herdr E2E passed")
         finally:
             if config_path:
-                restore_config_for_smoke(config_path, config_backup, pane_a, session)
+                restore_config_for_smoke(config_path, config_backup)
             if workspace_id:
                 herdr(["workspace", "close", workspace_id], session=session, check=False, echo=False)
 
@@ -1097,8 +1026,6 @@ def complex_fake_backend_e2e(plugin_id: str, session: Optional[str]) -> None:
         write_config_for_smoke(
             config_path,
             fake_backend_config(backend_path, source_path, source_a),
-            pane_a,
-            session,
         )
 
         def read_fake() -> str:
@@ -1198,7 +1125,7 @@ def complex_fake_backend_e2e(plugin_id: str, session: Optional[str]) -> None:
             log("complex fake Herdr E2E passed")
         finally:
             if config_path:
-                restore_config_for_smoke(config_path, config_backup, pane_a, session)
+                restore_config_for_smoke(config_path, config_backup)
             if workspace_id:
                 herdr(["workspace", "close", workspace_id], session=session, check=False, echo=False)
 

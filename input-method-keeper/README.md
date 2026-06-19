@@ -11,29 +11,66 @@ Version 1 is intentionally small:
 
 - macOS only
 - Python 3.9+ runtime
-- `macism` default backend
+- two backend choices: bundled Swift helper or `macism`
 - one global default input source
 - one global default action: `keep`, `reset`, or `ignore`
 - no rule engine yet
 
 For design and development details, see [DEVELOPMENT.md](DEVELOPMENT.md).
 
-## Install
+## Requirements
 
-Install dependencies:
+Required:
+
+- Herdr 0.7.0 or newer
+- macOS
+- Python 3.9 or newer
+
+If `python3` is not already available:
 
 ```sh
 brew install python
+```
+
+Choose one input-source backend:
+
+| Backend | Recommended for | Dependencies | Notes |
+| --- | --- | --- | --- |
+| Bundled Swift helper | Most users who can install Apple's command line tools | `swiftc`, usually from Xcode Command Line Tools | Recommended. It is included in this plugin, auto-compiles on first use, and supports input-context refresh. |
+| `macism` | Users who prefer an existing Homebrew tool or cannot compile Swift locally | Homebrew `macism` | Simpler runtime path, but it may leave some app input contexts stale when switching from CJK input methods to ABC. |
+
+Fresh configs start with `macism` for compatibility. The recommended setup below
+switches to the bundled Swift helper when `swiftc` is available.
+
+To install Apple's command line tools for the Swift helper:
+
+```sh
+xcode-select --install
+```
+
+To install `macism` instead:
+
+```sh
 brew tap laishulu/homebrew
 brew install macism
 ```
 
-Link and enable the local plugin:
+## Install From GitHub
+
+After this repository is public, install the plugin with Herdr's GitHub
+shorthand:
 
 ```sh
-cd /Users/ppggff/xxx/herdr-plugin
-herdr plugin link input-method-keeper
-herdr plugin enable local.input-method-keeper
+herdr plugin install ppggff/herdr-plugin/input-method-keeper
+```
+
+## Local Development Install
+
+Link and enable a local checkout:
+
+```sh
+herdr plugin link /path/to/herdr-plugin/input-method-keeper
+herdr plugin enable ppggff.input-method-keeper
 ```
 
 Run a basic smoke check:
@@ -44,25 +81,43 @@ input-method-keeper/scripts/herdr_smoke.py --link
 
 ## Quick Start
 
-1. Focus Herdr.
-2. Switch macOS to the input source you want as the fallback default.
-3. Run the Herdr plugin action `Set default input source`.
-4. Run `Use default input method action: keep`.
-5. Use Herdr normally. When you switch panes, the plugin should restore each
+1. Install the plugin.
+2. Choose a backend. The bundled Swift helper is recommended when `swiftc` is
+   available:
+
+   ```sh
+   herdr plugin action invoke ppggff.input-method-keeper.set-backend-helper
+   ```
+
+   Or use `macism`:
+
+   ```sh
+   herdr plugin action invoke ppggff.input-method-keeper.set-backend-macism
+   ```
+
+3. Focus Herdr.
+4. Switch macOS to the input source you want as the fallback default.
+5. Run the Herdr plugin action `Set default input source`.
+6. Run `Use default input method action: keep`.
+7. Use Herdr normally. When you switch panes, the plugin should restore each
    pane's remembered input source.
 
 You can run those actions from Herdr's action UI, or from a shell:
 
 ```sh
-herdr plugin action invoke set-default-input-source --plugin local.input-method-keeper
-herdr plugin action invoke set-default-action-keep --plugin local.input-method-keeper
-herdr plugin action invoke debug-on --plugin local.input-method-keeper
+herdr plugin action invoke ppggff.input-method-keeper.set-backend-helper
+herdr plugin action invoke ppggff.input-method-keeper.set-default-input-source
+herdr plugin action invoke ppggff.input-method-keeper.set-default-action-keep
+herdr plugin action invoke ppggff.input-method-keeper.debug-on
 ```
+
+The helper compiles the first time it is used. If `swiftc` is not installed,
+switch to `macism` or install Xcode Command Line Tools.
 
 Optional live dashboard:
 
 ```sh
-herdr plugin pane open --plugin local.input-method-keeper --entrypoint dashboard
+herdr plugin pane open --plugin ppggff.input-method-keeper --entrypoint dashboard
 ```
 
 Typical manual check:
@@ -95,7 +150,7 @@ Herdr exposes these actions:
 Run any action with:
 
 ```sh
-herdr plugin action invoke <action-id> --plugin local.input-method-keeper
+herdr plugin action invoke ppggff.input-method-keeper.<action-id>
 ```
 
 | Action id | Effect |
@@ -109,7 +164,7 @@ herdr plugin action invoke <action-id> --plugin local.input-method-keeper
 | `debug-on` | Set `debug` to true. |
 | `debug-off` | Set `debug` to false. |
 | `set-backend-helper` | Use the Swift helper backend with `--refresh`. |
-| `set-backend-macism` | Restore the default `macism` backend. |
+| `set-backend-macism` | Use the `macism` backend. |
 | `doctor` | Run repair-capable diagnostics. |
 | `doctor-gc-all` | Run diagnostics and remove old non-current session state. |
 
@@ -124,7 +179,7 @@ action invoke`, or bind those action ids in your Herdr key configuration.
 Open the read-only dashboard while testing:
 
 ```sh
-herdr plugin pane open --plugin local.input-method-keeper --entrypoint dashboard
+herdr plugin pane open --plugin ppggff.input-method-keeper --entrypoint dashboard
 ```
 
 Herdr returns the opened plugin pane id. Use that pane id if you want to focus
@@ -176,10 +231,11 @@ other Herdr pane, so it can also get its own remembered input source.
 Config lives in Herdr's plugin config directory:
 
 ```sh
-herdr plugin config-dir local.input-method-keeper
+herdr plugin config-dir ppggff.input-method-keeper
 ```
 
-The file is `config.json`:
+The file is `config.json`. After the recommended Swift helper setup, the main
+fields look like this:
 
 ```json
 {
@@ -193,14 +249,12 @@ The file is `config.json`:
   "focus_log": true,
   "status_ttl_ms": 600000,
   "backend": {
-    "name": "macism",
+    "name": "herdr-ime-helper",
     "executable_candidates": [
-      "/opt/homebrew/bin/macism",
-      "/usr/local/bin/macism",
-      "macism"
+      "/path/to/herdr-plugin/input-method-keeper/bin/herdr-ime-helper"
     ],
-    "current_args": [],
-    "select_args": ["{id}"]
+    "current_args": ["current"],
+    "select_args": ["select", "{id}", "--refresh", "--wait-ms", "150"]
   }
 }
 ```
@@ -223,22 +277,36 @@ JSON does not support comments. Keep notes outside `config.json`.
 
 ## Backend
 
-The default backend is `macism`:
-
-```text
-current command: macism
-select command:  macism {id}
-```
-
-You can replace the backend in `config.json` if you want to use another tool
-later. The plugin expects the backend to support:
+The backend is the small command-line tool that reads and switches the macOS
+input source. The plugin owns pane memory, config, state, notifications, and
+Herdr integration; the backend only provides:
 
 ```text
 current() -> input_source_id
 select(input_source_id) -> success/failure
 ```
 
-This repo also includes a Swift helper backend:
+### Bundled Swift Helper
+
+Recommended when `swiftc` is available:
+
+```sh
+herdr plugin action invoke ppggff.input-method-keeper.set-backend-helper
+```
+
+The helper uses macOS TIS APIs directly. It is not compiled during
+`herdr plugin install`; `bin/herdr-ime-helper` compiles
+`helpers/herdr-ime-helper.swift` automatically the first time the helper runs.
+When Herdr launches it, the compiled binary is cached under:
+
+```text
+HERDR_PLUGIN_STATE_DIR/helper-build/herdr-ime-helper
+```
+
+For direct manual runs outside Herdr, it caches under `TMPDIR`. It recompiles
+when the Swift source is newer than the cached binary.
+
+Manual helper commands:
 
 ```sh
 input-method-keeper/bin/herdr-ime-helper current
@@ -248,29 +316,88 @@ input-method-keeper/bin/herdr-ime-helper select com.apple.keylayout.ABC --refres
 input-method-keeper/bin/herdr-ime-helper refresh --wait-ms 150
 ```
 
-The helper uses macOS TIS APIs directly. `--refresh` creates a tiny temporary
-AppKit window to refresh the current input context; the helper does not decide
-when refresh is needed. This has manually fixed the observed WeType
-`pinyin -> ABC` Shift-hotkey residue in Herdr. To use it as the backend, set
-`backend` to:
+`--refresh` creates a tiny temporary AppKit window to refresh the current input
+context; the helper does not decide when refresh is needed. The plugin's
+helper backend currently uses `select <id> --refresh --wait-ms 150`. This has
+manually fixed the observed WeType `pinyin -> ABC` Shift-hotkey residue in
+Herdr.
+
+After `set-backend-helper`, `config.json` contains:
 
 ```json
 {
   "name": "herdr-ime-helper",
   "executable_candidates": [
-    "/Users/ppggff/xxx/herdr-plugin/input-method-keeper/bin/herdr-ime-helper"
+    "/path/to/herdr-plugin/input-method-keeper/bin/herdr-ime-helper"
   ],
   "current_args": ["current"],
   "select_args": ["select", "{id}", "--refresh", "--wait-ms", "150"]
 }
 ```
 
-The same switch can be done through actions:
+### macism Backend
+
+Use `macism` when you prefer the Homebrew tool or do not have `swiftc`:
 
 ```sh
-herdr plugin action invoke set-backend-helper --plugin local.input-method-keeper
-herdr plugin action invoke set-backend-macism --plugin local.input-method-keeper
+herdr plugin action invoke ppggff.input-method-keeper.set-backend-macism
 ```
+
+A fresh config currently starts with this backend for compatibility:
+
+```text
+current command: macism
+select command:  macism {id}
+```
+
+With `macism` v3.1.1, switching from a CJK input method such as WeType pinyin
+to `com.apple.keylayout.ABC` may update the system input source while leaving
+Herdr's current text input context stale. Use the Swift helper if you see that
+behavior.
+
+## Supporting Other Operating Systems
+
+The current release is declared as macOS-only in `herdr-plugin.toml` because the
+bundled helper and the tested backend path use macOS input-source APIs. Treat
+`platforms` as the plugin author's support contract, not a setting normal users
+should edit after install. A user can fork or locally link a modified copy for
+experiments, but the public manifest should only list OSes this repo actually
+supports and tests.
+
+The plugin design is still backend-oriented: pane memory, config, state, Herdr
+events, and dashboard rendering live in Python, while OS-specific input-method
+work belongs in a helper command.
+
+To support another OS, provide a helper executable with the same backend
+contract:
+
+```text
+current           # print the current input source id to stdout
+select <id>       # switch to the requested input source and exit 0 on success
+list              # optional, print known input source ids
+```
+
+Then configure it in `config.json`:
+
+```json
+{
+  "backend": {
+    "name": "my-os-helper",
+    "executable_candidates": ["/path/to/my-os-helper", "my-os-helper"],
+    "current_args": ["current"],
+    "select_args": ["select", "{id}"]
+  }
+}
+```
+
+For a built-in helper, add a small config profile action like
+`set-backend-helper`, document the dependency, and test the full focus flow
+before this repository adds that OS to `platforms`.
+
+Unix-like systems are the smaller step because the plugin already uses Python,
+POSIX shell wrappers, and `fcntl` file locks. Windows support would need more
+work: a non-POSIX launcher, a Windows file-lock implementation, and a Windows
+input-method helper before declaring `platforms = ["windows"]`.
 
 ## Testing
 
@@ -285,8 +412,8 @@ input-method-keeper/scripts/herdr_smoke.py --session ime-smoke --link --full-ime
 The first command verifies manifest actions. The second drives live Herdr panes
 with a fake backend and covers three-pane memory restore, quick focus changes,
 `reset`, `ignore`, disable/enable, config restore, and workspace cleanup. The
-third runs real `macism` inside a temporary Herdr pane and also exercises real
-`reset` and `ignore`.
+third currently runs real `macism` inside a temporary Herdr pane and also
+exercises real `reset` and `ignore`.
 
 If auto-detection cannot find two switchable input sources, pass them explicitly:
 
@@ -305,7 +432,8 @@ Use the dedicated `ime-smoke` session for live smoke tests so pane memory is
 kept separate from the default Herdr session. The smoke runner only backs up and
 restores the selected session's state files. In a sandboxed runner, the plugin
 state and config directories must be writable; otherwise the smoke runner fails
-its restore preflight before destructive E2E actions run.
+its restore preflight or E2E setup before destructive actions run. It does not
+fall back to writing config or state through a Herdr pane.
 
 ## Troubleshooting
 

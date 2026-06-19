@@ -174,11 +174,14 @@ bin/herdr-ime-helper refresh [--wait-ms N]
 first run, caching the binary under `HERDR_PLUGIN_STATE_DIR/helper-build` when
 Herdr provides a state directory, or under `TMPDIR` for manual runs. The wrapper
 uses a small directory lock around compilation so concurrent first runs do not
-write the same cached binary at the same time. The Swift code uses TIS APIs for
-`current`, `list`, and `select`. `--refresh` only creates a tiny temporary AppKit
-window and waits; it intentionally contains no CJKV or policy logic. The Python
-plugin remains the policy owner and may later decide when to add `--refresh` to
-select calls. The actions
+write the same cached binary at the same time. The lock records a pid and
+creation timestamp so a dead compiler process or old pidless lock can be
+recovered without stealing an active compiler lock. The Swift code uses TIS
+APIs for `current`, `list`, and `select`.
+`--refresh` only creates a tiny temporary AppKit window and waits; it
+intentionally contains no CJKV or policy logic. The Python plugin remains the
+policy owner and may later decide when to add `--refresh` to select calls. The
+actions
 `set-backend-helper` and `set-backend-macism` switch `config.json` between the
 helper and the default `macism` backend.
 
@@ -818,7 +821,7 @@ commands can continue to use `bin/ime-keeper` directly.
 Open it with:
 
 ```sh
-herdr plugin pane open --plugin local.input-method-keeper --entrypoint dashboard
+herdr plugin pane open --plugin ppggff.input-method-keeper --entrypoint dashboard
 ```
 
 `bin/ime-keeper dashboard` is read-only. It refreshes in place once per second
@@ -868,7 +871,7 @@ own remembered input source.
 ## Draft Manifest
 
 ```toml
-id = "local.input-method-keeper"
+id = "ppggff.input-method-keeper"
 name = "Input Method Keeper"
 version = "0.1.0"
 min_herdr_version = "0.7.0"
@@ -970,13 +973,13 @@ Users can bind actions in Herdr config:
 [[keys.command]]
 key = "prefix+i"
 type = "plugin_action"
-command = "local.input-method-keeper.toggle-enabled"
+command = "ppggff.input-method-keeper.toggle-enabled"
 description = "toggle input method keeper"
 
 [[keys.command]]
 key = "prefix+shift+i"
 type = "plugin_action"
-command = "local.input-method-keeper.status"
+command = "ppggff.input-method-keeper.status"
 description = "input method keeper status"
 ```
 
@@ -1075,16 +1078,17 @@ When running inside Codex or another sandbox, the live smoke runner must be able
 to write both:
 
 ```text
-~/.local/state/herdr/plugins/local.input-method-keeper
-~/.config/herdr/plugins/config/local.input-method-keeper
+~/.local/state/herdr/plugins/ppggff.input-method-keeper
+~/.config/herdr/plugins/config/ppggff.input-method-keeper
 ```
 
 The runner performs a state-restore write preflight after `status` and before
 destructive E2E actions such as `set-default-action-reset` or `toggle-enabled`.
-If the sandbox cannot write the plugin state directory, smoke fails before those
-actions run. Do not bypass this by executing restore scripts through a user pane;
-that can inject commands into the active Herdr pane. Instead, either grant the
-sandbox these writable roots or run live smoke from a normal terminal.
+If the sandbox cannot write the plugin state directory or config directory, smoke
+fails before or during the E2E setup. Do not bypass this by executing restore
+scripts through a Herdr pane; that can inject commands into an interactive
+terminal. Instead, either grant the sandbox these writable roots or run live
+smoke from a normal terminal.
 
 To clean up the dedicated smoke session:
 
@@ -1176,6 +1180,12 @@ context.
 
 ## Future Ideas
 
+- Reduce the `pane.focused` `run.lock` critical section. The current
+  implementation keeps state updates serialized and uses short external-command
+  timeouts, but still calls backend current/select and Herdr status publishing
+  while holding `run.lock`. A future refactor should snapshot/load state under
+  the lock, run backend/Herdr I/O outside the lock where possible, then re-enter
+  the lock with a generation or last-seen validation before saving state.
 - A simple TUI settings pane could build on the dashboard once the current
   behavior has been used for a while. Keep it as a settings and explicit-action
   surface, not a replacement for the automatic focus handler.

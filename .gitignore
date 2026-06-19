@@ -1,0 +1,18 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local Herdr/plugin runtime artifacts should live in Herdr-managed config and
+# state directories, but ignore these names if they are created during manual
+# development.
+config.json
+state.json
+debug.current
+debug.*.log
+focus.log
+helper-build/

@@ -627,7 +627,7 @@ class HerdrClient:
                 "report-metadata",
                 pane_id,
                 "--source",
-                "local.input-method-keeper",
+                "ppggff.input-method-keeper",
                 "--custom-status",
                 status,
                 "--ttl-ms",
