@@ -47,6 +47,22 @@ class ConfigError(Exception):
     pass
 
 
+def coerce_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return default
+
+
 @dataclasses.dataclass(frozen=True)
 class CommandResult:
     ok: bool
@@ -152,11 +168,15 @@ def merge_config(value: Mapping[str, Any]) -> Dict[str, Any]:
     action = str(config.get("default_action", "keep"))
     if action not in VALID_ACTIONS:
         config["default_action"] = "keep"
-    config["enabled"] = bool(config.get("enabled", True))
-    config["debug"] = bool(config.get("debug", False))
-    config["notify_on_focus"] = bool(config.get("notify_on_focus", True))
-    config["pane_status_on_focus"] = bool(config.get("pane_status_on_focus", True))
-    config["focus_log"] = bool(config.get("focus_log", True))
+    config["enabled"] = coerce_bool(config.get("enabled"), bool(DEFAULT_CONFIG["enabled"]))
+    config["debug"] = coerce_bool(config.get("debug"), bool(DEFAULT_CONFIG["debug"]))
+    config["notify_on_focus"] = coerce_bool(
+        config.get("notify_on_focus"), bool(DEFAULT_CONFIG["notify_on_focus"])
+    )
+    config["pane_status_on_focus"] = coerce_bool(
+        config.get("pane_status_on_focus"), bool(DEFAULT_CONFIG["pane_status_on_focus"])
+    )
+    config["focus_log"] = coerce_bool(config.get("focus_log"), bool(DEFAULT_CONFIG["focus_log"]))
     try:
         config["status_ttl_ms"] = max(1000, int(config.get("status_ttl_ms", 600000)))
     except (TypeError, ValueError):
@@ -262,6 +282,18 @@ class StateStore:
             raise ValueError("unsupported version")
         if not isinstance(state.get("panes"), dict):
             raise ValueError("panes must be an object")
+        last_focused = state.get("last_focused_pane_id")
+        if last_focused is not None and not isinstance(last_focused, str):
+            raise ValueError("last_focused_pane_id must be a string or null")
+        for pane_id, pane_state in state["panes"].items():
+            if not isinstance(pane_id, str):
+                raise ValueError("pane id must be a string")
+            if not isinstance(pane_state, dict):
+                raise ValueError(f"pane entry must be an object: {pane_id}")
+            for field in ("input_source_id", "workspace_id", "tab_id", "agent", "cwd"):
+                value = pane_state.get(field)
+                if value is not None and not isinstance(value, str):
+                    raise ValueError(f"pane entry {field} must be a string or null: {pane_id}")
 
     def save(self, state: Mapping[str, Any]) -> None:
         data = dict(state)
@@ -341,8 +373,17 @@ class BackendExecutor:
         self.executable = self._resolve_executable(
             backend.get("executable_candidates", ["macism"])
         )
-        self.current_args = list(backend.get("current_args", []))
-        self.select_args = list(backend.get("select_args", ["{id}"]))
+        self.current_args = self._coerce_args(backend.get("current_args", []), [])
+        self.select_args = self._coerce_args(backend.get("select_args", ["{id}"]), ["{id}"])
+
+    def _coerce_args(self, value: Any, default: List[str]) -> List[str]:
+        if value is None:
+            return list(default)
+        if isinstance(value, str):
+            return [value]
+        if isinstance(value, (list, tuple)):
+            return [str(item) for item in value]
+        return list(default)
 
     def _resolve_executable(self, candidates: Any) -> str:
         if isinstance(candidates, str):
@@ -361,7 +402,7 @@ class BackendExecutor:
     def _run(self, args: List[str], timeout: float = 2.0) -> CommandResult:
         try:
             completed = subprocess.run(
-                [self.executable] + args,
+                [self.executable] + [str(arg) for arg in args],
                 text=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -667,6 +708,34 @@ def event_from_env(env: Mapping[str, str]) -> Optional[Dict[str, Any]]:
     return value if isinstance(value, dict) else None
 
 
+def context_from_env(env: Mapping[str, str]) -> Dict[str, Any]:
+    raw = env.get("HERDR_PLUGIN_CONTEXT_JSON", "")
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def apply_context_fallback(
+    event_name: str,
+    parsed: Dict[str, Any],
+    env: Mapping[str, str],
+) -> Dict[str, Any]:
+    if event_name != "pane.focused" or parsed.get("pane_id"):
+        return parsed
+    context = context_from_env(env)
+    focused_pane_id = context.get("focused_pane_id")
+    if isinstance(focused_pane_id, str) and focused_pane_id:
+        parsed["pane_id"] = focused_pane_id
+    workspace_id = context.get("workspace_id")
+    if not parsed.get("workspace_id") and isinstance(workspace_id, str) and workspace_id:
+        parsed["workspace_id"] = workspace_id
+    return parsed
+
+
 def reconcile_state_policy(config: Mapping[str, Any], store: StateStore, cause: str) -> str:
     if not bool(config.get("enabled", True)):
         store.clear()
@@ -754,12 +823,12 @@ def focus_debug_base(
 
 
 def pane_metadata(pane: Mapping[str, Any]) -> Dict[str, Any]:
-    return {
-        "workspace_id": pane.get("workspace_id"),
-        "tab_id": pane.get("tab_id"),
-        "agent": pane.get("agent"),
-        "cwd": pane.get("cwd"),
-    }
+    metadata: Dict[str, Any] = {}
+    for field in ("workspace_id", "tab_id", "agent", "cwd"):
+        value = pane.get(field)
+        if isinstance(value, str) and value:
+            metadata[field] = value
+    return metadata
 
 
 def short_input_source(input_source_id: Optional[str]) -> str:
@@ -1207,7 +1276,7 @@ def handle_event(
     herdr = herdr if herdr is not None else HerdrClient(actual_env)
     event_name = event_dot_name(command_event)
     event_payload = dict(event or event_from_env(actual_env) or {})
-    parsed = parse_event(event_name, event_payload)
+    parsed = apply_context_fallback(event_name, parse_event(event_name, event_payload), actual_env)
     if command_event == "pane-focused":
         return handle_pane_focused(context, store, backend, herdr, parsed, debounce_seconds)
     if command_event == "pane-closed":
@@ -1227,7 +1296,9 @@ def stable_current_pane(herdr: Any, debounce_seconds: float) -> Optional[Dict[st
         return None
     if debounce_seconds > 0:
         time.sleep(debounce_seconds)
-    second = herdr.current_pane() or first
+    second = herdr.current_pane()
+    if not second:
+        return None
     if second.get("pane_id") != first.get("pane_id"):
         return second
     return first
@@ -1275,7 +1346,18 @@ def handle_pane_focused(
                     store.clear_dirty()
                     return 0
                 current_again = herdr.current_pane()
-                if current_again and current_again.get("pane_id") != stable_pane_id:
+                if not current_again:
+                    log_debug(
+                        store,
+                        config,
+                        {
+                            **focus_debug_base(config, mode, stable_pane_id),
+                            "reason": "current-pane-unavailable-before-decision",
+                        },
+                    )
+                    store.clear_dirty()
+                    return 0
+                if current_again.get("pane_id") != stable_pane_id:
                     log_debug(
                         store,
                         config,
@@ -1408,7 +1490,19 @@ def handle_pane_focused(
                         )
                         return 0
                     current_after_backend = herdr.current_pane()
-                    if current_after_backend and current_after_backend.get("pane_id") != stable_pane_id:
+                    if not current_after_backend:
+                        log_debug(
+                            store,
+                            config,
+                            {
+                                **focus_debug_base(config, "keep", stable_pane_id, previous_pane_id),
+                                "observed_previous_input_source": pending_observation,
+                                "reason": "current-pane-unavailable-after-observation",
+                            },
+                        )
+                        store.clear_dirty()
+                        return 0
+                    if current_after_backend.get("pane_id") != stable_pane_id:
                         log_debug(
                             store,
                             config,
@@ -1435,7 +1529,21 @@ def handle_pane_focused(
                 target_entry = panes.get(stable_pane_id, {})
                 target = target_entry.get("input_source_id") or config.get("default_input_source", "")
                 current_before_select = herdr.current_pane()
-                if current_before_select and current_before_select.get("pane_id") != stable_pane_id:
+                if not current_before_select:
+                    log_debug(
+                        store,
+                        config,
+                        {
+                            **focus_debug_base(config, "keep", stable_pane_id, previous_pane_id),
+                            "observed_previous_input_source": pending_observation,
+                            "target_input_source": target,
+                            "stored_target_input_source": target_entry.get("input_source_id"),
+                            "reason": "current-pane-unavailable-before-select",
+                        },
+                    )
+                    store.clear_dirty()
+                    return 0
+                if current_before_select.get("pane_id") != stable_pane_id:
                     log_debug(
                         store,
                         config,
@@ -1633,9 +1741,23 @@ def handle_pane_moved(context: HerdrContext, store: StateStore, parsed: Mapping[
             log_debug(store, config, {"event": "pane-moved", "error": diagnostic})
             return 0
         old_id = parsed.get("previous_pane_id")
+        previous_workspace_id = parsed.get("previous_workspace_id")
+        previous_tab_id = parsed.get("previous_tab_id")
         pane = parsed.get("pane") if isinstance(parsed.get("pane"), dict) else {}
         new_id = pane.get("pane_id")
-        if not old_id or not new_id:
+        new_workspace_id = pane.get("workspace_id")
+        new_tab_id = pane.get("tab_id")
+        if not all(
+            isinstance(value, str) and value
+            for value in (
+                old_id,
+                previous_workspace_id,
+                previous_tab_id,
+                new_id,
+                new_workspace_id,
+                new_tab_id,
+            )
+        ):
             log_debug(
                 store,
                 config,
@@ -1644,7 +1766,11 @@ def handle_pane_moved(context: HerdrContext, store: StateStore, parsed: Mapping[
                     "mode": mode,
                     "old": old_id,
                     "new": new_id,
-                    "reason": "missing-pane-id",
+                    "previous_workspace_id": previous_workspace_id,
+                    "previous_tab_id": previous_tab_id,
+                    "new_workspace_id": new_workspace_id,
+                    "new_tab_id": new_tab_id,
+                    "reason": "missing-move-metadata",
                 },
             )
             return 0
@@ -2073,7 +2199,7 @@ def doctor(
     store = StateStore(context.state_dir, context.identity)
     herdr = herdr if herdr is not None else HerdrClient(env)
     with FileLock(run_lock_path(context.state_dir), blocking=True):
-        config = load_config(context.config_dir, readonly=False)
+        config = ensure_config(context.config_dir)
         state, diagnostic = store.load(readonly=False)
         mode = reconcile_state_policy(config, store, "doctor")
         result = {

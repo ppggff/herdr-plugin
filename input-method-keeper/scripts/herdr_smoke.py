@@ -28,6 +28,8 @@ REQUIRED_ACTIONS = {
     "set-default-action-ignore",
     "debug-on",
     "debug-off",
+    "set-backend-helper",
+    "set-backend-macism",
     "doctor",
     "doctor-gc-all",
 }
@@ -118,6 +120,8 @@ def assert_local_files(plugin_path: Path) -> None:
     required = [
         plugin_path / "herdr-plugin.toml",
         plugin_path / "bin" / "ime-keeper",
+        plugin_path / "bin" / "herdr-ime-helper",
+        plugin_path / "helpers" / "herdr-ime-helper.swift",
         plugin_path / "src" / "ime_keeper.py",
     ]
     for path in required:
@@ -125,6 +129,8 @@ def assert_local_files(plugin_path: Path) -> None:
             raise SmokeFailure(f"missing plugin file: {path}")
     if not os.access(plugin_path / "bin" / "ime-keeper", os.X_OK):
         raise SmokeFailure("bin/ime-keeper must be executable")
+    if not os.access(plugin_path / "bin" / "herdr-ime-helper", os.X_OK):
+        raise SmokeFailure("bin/herdr-ime-helper must be executable")
 
 
 def plugin_list(plugin_id: str, session: Optional[str]) -> list[dict[str, Any]]:

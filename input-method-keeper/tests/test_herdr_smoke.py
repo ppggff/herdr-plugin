@@ -4,6 +4,7 @@ import json
 import sys
 import unittest
 import contextlib
+import tomllib
 from pathlib import Path
 
 
@@ -68,6 +69,14 @@ class CliOptionTests(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertIn("--real-actions requires --full-ime", stderr.getvalue())
+
+
+class ManifestCoverageTests(unittest.TestCase):
+    def test_required_actions_match_manifest_actions(self):
+        manifest = tomllib.loads((ROOT / "herdr-plugin.toml").read_text(encoding="utf-8"))
+        manifest_actions = {action["id"] for action in manifest.get("actions", [])}
+
+        self.assertEqual(herdr_smoke.REQUIRED_ACTIONS, manifest_actions)
 
 
 if __name__ == "__main__":

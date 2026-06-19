@@ -177,6 +177,30 @@ class StateStoreTests(TempEnvTest):
         self.assertIn("repaired", diagnostic)
         self.assertEqual(len(list(session_dir.glob("state.json.broken.*"))), 1)
 
+    def test_state_load_rejects_non_object_pane_entries(self):
+        self.write_config()
+        identity = ime_keeper.session_identity(
+            ime_keeper.load_config(self.config_dir, readonly=True), self.env
+        )
+        session_dir = self.state_dir / "sessions" / identity.key
+        session_dir.mkdir(parents=True)
+        (session_dir / "state.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "last_focused_pane_id": "w1:p1",
+                    "panes": {"w1:p1": "broken"},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        store = ime_keeper.StateStore(self.state_dir, identity)
+        state, diagnostic = store.load(readonly=True)
+
+        self.assertIsNone(state)
+        self.assertIn("pane entry", diagnostic)
+
     def test_reconcile_policy_clears_current_session_state_and_dirty_marker(self):
         self.write_config(default_action="reset")
         identity = ime_keeper.session_identity(
@@ -203,6 +227,38 @@ class BackendTests(unittest.TestCase):
 
         self.assertEqual(result, "already-current")
         self.assertEqual(backend.selected, [])
+
+    def test_backend_executor_does_not_split_string_args_or_crash_on_null_args(self):
+        config = ime_keeper.default_config()
+        config["backend"] = {
+            "executable_candidates": ["macism"],
+            "current_args": "current",
+            "select_args": None,
+        }
+
+        backend = ime_keeper.BackendExecutor(config)
+
+        self.assertEqual(backend.current_args, ["current"])
+        self.assertEqual(backend.select_args, ["{id}"])
+
+
+class ConfigTests(unittest.TestCase):
+    def test_merge_config_parses_common_string_booleans(self):
+        config = ime_keeper.merge_config(
+            {
+                "enabled": "false",
+                "debug": "1",
+                "notify_on_focus": "0",
+                "pane_status_on_focus": "true",
+                "focus_log": "false",
+            }
+        )
+
+        self.assertFalse(config["enabled"])
+        self.assertTrue(config["debug"])
+        self.assertFalse(config["notify_on_focus"])
+        self.assertTrue(config["pane_status_on_focus"])
+        self.assertFalse(config["focus_log"])
 
 
 class DebugLoggingTests(TempEnvTest):
@@ -315,6 +371,83 @@ class EventHandlerTests(TempEnvTest):
 
         self.assertEqual(code, 0)
 
+    def test_focus_reset_does_not_select_when_current_pane_confirmation_fails(self):
+        self.write_config(default_action="reset", default_input_source="abc", debug=True)
+        event = {"event": "pane_focused", "data": {"pane_id": "w1:p1", "workspace_id": "w1"}}
+        backend = FakeBackend(["other"])
+
+        code = ime_keeper.handle_event(
+            "pane-focused",
+            self.env,
+            backend=backend,
+            herdr=FakeHerdr(["w1:p1"]),
+            event=event,
+            debounce_seconds=0,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(backend.selected, [])
+
+    def test_focus_keep_does_not_select_when_current_pane_confirmation_fails(self):
+        self.write_config(default_action="keep", default_input_source="default")
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        state = ime_keeper.empty_state(context.identity)
+        state["last_focused_pane_id"] = "w1:p1"
+        state["panes"] = {
+            "w1:p2": {
+                "input_source_id": "target",
+                "workspace_id": "w1",
+                "tab_id": "w1:t1",
+            }
+        }
+        store.save(state)
+        backend = FakeBackend(["observed", "before-select"])
+        event = {"event": "pane_focused", "data": {"pane_id": "w1:p2", "workspace_id": "w1"}}
+
+        code = ime_keeper.handle_event(
+            "pane-focused",
+            self.env,
+            backend=backend,
+            herdr=FakeHerdr(["w1:p2"]),
+            event=event,
+            debounce_seconds=0,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(backend.selected, [])
+
+    def test_focus_keep_repairs_invalid_pane_entry_state(self):
+        self.write_config(default_action="keep", default_input_source="abc")
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        store.session_dir.mkdir(parents=True)
+        store.state_path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "last_focused_pane_id": "w1:p1",
+                    "panes": {"w1:p2": "broken"},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        code = ime_keeper.handle_event(
+            "pane-focused",
+            self.env,
+            backend=FakeBackend(["abc"]),
+            herdr=FakeHerdr(["w1:p2", "w1:p2", "w1:p2", "w1:p2", "w1:p2"]),
+            event={"event": "pane_focused", "data": {"pane_id": "w1:p2", "workspace_id": "w1"}},
+            debounce_seconds=0,
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(list(store.session_dir.glob("state.json.broken.*"))), 1)
+        state, diagnostic = store.load(readonly=True)
+        self.assertIsNone(diagnostic)
+        self.assertEqual(state["last_focused_pane_id"], "w1:p2")
+
     def test_tab_closed_removes_panes_for_that_tab(self):
         self.write_config(default_action="keep")
         context = ime_keeper.HerdrContext.from_env(self.env)
@@ -356,7 +489,7 @@ class EventHandlerTests(TempEnvTest):
         store.save(state)
         event = {"event": "pane_focused", "data": {"pane_id": "w1:p2", "workspace_id": "w1"}}
         backend = FakeBackend(["com.apple.keylayout.ABC", "com.apple.keylayout.ABC"])
-        herdr = FakeHerdr(["w1:p2", "w1:p2", "w1:p2", "w1:p2"])
+        herdr = FakeHerdr(["w1:p2", "w1:p2", "w1:p2", "w1:p2", "w1:p2"])
 
         ime_keeper.handle_event(
             "pane-focused",
@@ -393,7 +526,7 @@ class EventHandlerTests(TempEnvTest):
         store.save(state)
         event = {"event": "pane_focused", "data": {"pane_id": "w1:p2", "workspace_id": "w1"}}
         backend = FakeBackend(["com.apple.keylayout.ABC", "com.apple.keylayout.ABC"])
-        herdr = FakeHerdr(["w1:p2", "w1:p2", "w1:p2", "w1:p2"])
+        herdr = FakeHerdr(["w1:p2", "w1:p2", "w1:p2", "w1:p2", "w1:p2"])
 
         ime_keeper.handle_event(
             "pane-focused",
@@ -469,6 +602,66 @@ class EventHandlerTests(TempEnvTest):
         self.assertEqual(log_entry["backend_current_before_select"], "com.apple.keylayout.ABC")
         self.assertEqual(log_entry["select_action"], "selected")
         self.assertEqual(log_entry["reason"], "restored-target")
+
+    def test_pane_moved_missing_metadata_does_not_migrate_or_overwrite_state(self):
+        self.write_config(default_action="keep")
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        state = ime_keeper.empty_state(context.identity)
+        state["last_focused_pane_id"] = "w1:p1"
+        state["panes"] = {
+            "w1:p1": {
+                "input_source_id": "abc",
+                "workspace_id": "w1",
+                "tab_id": "w1:t1",
+            }
+        }
+        store.save(state)
+        event = {
+            "event": "pane_moved",
+            "data": {
+                "previous_pane_id": "w1:p1",
+                "previous_workspace_id": "w1",
+                "previous_tab_id": "w1:t1",
+                "pane": {"pane_id": "w2:p1"},
+            },
+        }
+
+        ime_keeper.handle_event(
+            "pane-moved", self.env, backend=FakeBackend([]), herdr=FakeHerdr([]), event=event
+        )
+
+        state, _ = store.load(readonly=True)
+        self.assertIn("w1:p1", state["panes"])
+        self.assertNotIn("w2:p1", state["panes"])
+        self.assertEqual(state["panes"]["w1:p1"]["workspace_id"], "w1")
+        self.assertEqual(state["panes"]["w1:p1"]["tab_id"], "w1:t1")
+
+    def test_context_focused_pane_id_is_used_for_dirty_marker_fallback(self):
+        self.write_config(default_action="keep")
+        env = dict(
+            self.env,
+            HERDR_PLUGIN_EVENT_JSON=json.dumps({"event": "pane_focused", "data": {}}),
+            HERDR_PLUGIN_CONTEXT_JSON=json.dumps(
+                {"focused_pane_id": "w1:p9", "workspace_id": "w1"}
+            ),
+        )
+        context = ime_keeper.HerdrContext.from_env(env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        store.session_dir.mkdir(parents=True)
+
+        with ime_keeper.FileLock(store.focus_lock_path, blocking=True):
+            code = ime_keeper.handle_event(
+                "pane-focused",
+                env,
+                backend=FakeBackend([]),
+                herdr=FakeHerdr([]),
+                debounce_seconds=0,
+            )
+
+        self.assertEqual(code, 0)
+        dirty = json.loads(store.dirty_path.read_text(encoding="utf-8"))
+        self.assertEqual(dirty["pane_id"], "w1:p9")
 
 
 class CliTests(TempEnvTest):
@@ -625,6 +818,31 @@ class CliTests(TempEnvTest):
         self.assertEqual(macism_config["backend"]["name"], "macism")
         self.assertEqual(macism_config["backend"]["current_args"], [])
         self.assertEqual(macism_config["backend"]["select_args"], ["{id}"])
+
+    def test_set_backend_macism_repairs_invalid_backend_arg_config(self):
+        config = ime_keeper.default_config()
+        config["backend"]["current_args"] = None
+        (self.config_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+
+        code = ime_keeper.main(["set-backend-macism"], env=self.env)
+
+        self.assertEqual(code, 0)
+        repaired = ime_keeper.load_config(self.config_dir, readonly=True)
+        self.assertEqual(repaired["backend"]["name"], "macism")
+        self.assertEqual(repaired["backend"]["current_args"], [])
+        self.assertEqual(repaired["backend"]["select_args"], ["{id}"])
+
+    def test_doctor_creates_missing_config(self):
+        stdout = io.StringIO()
+
+        with contextlib.redirect_stdout(stdout):
+            code = ime_keeper.main(
+                ["doctor"], env=self.env, backend=FakeBackend(["abc"]), herdr=FakeHerdr([])
+            )
+
+        self.assertEqual(code, 0)
+        self.assertTrue((self.config_dir / "config.json").exists())
+        self.assertEqual(ime_keeper.load_config(self.config_dir)["default_action"], "keep")
 
     def test_doctor_does_not_select_by_default(self):
         self.write_config()
