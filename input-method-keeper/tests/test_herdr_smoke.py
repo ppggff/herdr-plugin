@@ -185,6 +185,19 @@ class StateBackupTests(unittest.TestCase):
             self.assertEqual(state_path.read_text(encoding="utf-8"), '{"panes":{"p1":{}}}\n')
             self.assertFalse(list(session_a.glob(".smoke-restore-probe-*")))
 
+    def test_state_restore_preflight_handles_missing_empty_session_dir(self):
+        with TemporaryDirectory() as temp_dir:
+            session_dir = Path(temp_dir) / "sessions" / "empty-session"
+            backup = herdr_smoke.StateBackup(
+                session_dir=session_dir,
+                session_existed=False,
+                files={},
+            )
+
+            herdr_smoke.assert_state_restore_writable(backup)
+
+            self.assertFalse(session_dir.exists())
+
     def test_state_restore_preflight_fails_before_destructive_actions_when_unwritable(self):
         with TemporaryDirectory() as temp_dir:
             state_dir = Path(temp_dir)

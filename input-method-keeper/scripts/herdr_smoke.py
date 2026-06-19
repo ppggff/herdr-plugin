@@ -386,6 +386,7 @@ def assert_state_restore_writable(backup: StateBackup) -> None:
             failures.append(f"{relative}: {exc}")
     probe_path = backup.session_dir / f".smoke-restore-probe-{os.getpid()}-{int(time.time() * 1000)}"
     try:
+        backup.session_dir.mkdir(parents=True, exist_ok=True)
         write_state_backup_file(probe_path, b"{}\n")
         probe_path.unlink()
     except Exception as exc:
