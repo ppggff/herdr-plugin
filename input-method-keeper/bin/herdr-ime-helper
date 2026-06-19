@@ -27,9 +27,34 @@ BIN="$BUILD_DIR/herdr-ime-helper"
 mkdir -p "$BUILD_DIR"
 
 if [ ! -x "$BIN" ] || [ "$SRC" -nt "$BIN" ]; then
+  LOCK_DIR="$BUILD_DIR/.compile.lock"
+  LOCK_START=$(date +%s)
+  while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+    NOW=$(date +%s)
+    if [ $((NOW - LOCK_START)) -gt 30 ]; then
+      printf '%s\n' "herdr-ime-helper: timed out waiting for compile lock: $LOCK_DIR" >&2
+      exit 1
+    fi
+    sleep 0.05
+  done
+  TMP_BIN=""
+  cleanup() {
+    if [ -n "$TMP_BIN" ]; then
+      rm -f "$TMP_BIN"
+    fi
+    rmdir "$LOCK_DIR" 2>/dev/null || true
+  }
+  trap cleanup EXIT HUP INT TERM
   MODULE_CACHE="$BUILD_DIR/module-cache"
   mkdir -p "$MODULE_CACHE"
-  CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" "$SWIFTC" "$SRC" -o "$BIN"
+  if [ ! -x "$BIN" ] || [ "$SRC" -nt "$BIN" ]; then
+    TMP_BIN="$BUILD_DIR/.herdr-ime-helper.$$"
+    CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" "$SWIFTC" "$SRC" -o "$TMP_BIN"
+    mv "$TMP_BIN" "$BIN"
+    TMP_BIN=""
+  fi
+  cleanup
+  trap - EXIT HUP INT TERM
 fi
 
 exec "$BIN" "$@"

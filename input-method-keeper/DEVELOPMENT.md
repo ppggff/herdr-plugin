@@ -172,11 +172,13 @@ bin/herdr-ime-helper refresh [--wait-ms N]
 `bin/herdr-ime-helper` is a POSIX wrapper around
 `helpers/herdr-ime-helper.swift`. It compiles the Swift source with `swiftc` on
 first run, caching the binary under `HERDR_PLUGIN_STATE_DIR/helper-build` when
-Herdr provides a state directory, or under `TMPDIR` for manual runs. The Swift
-code uses TIS APIs for `current`, `list`, and `select`. `--refresh` only creates
-a tiny temporary AppKit window and waits; it intentionally contains no CJKV or
-policy logic. The Python plugin remains the policy owner and may later decide
-when to add `--refresh` to select calls. The actions
+Herdr provides a state directory, or under `TMPDIR` for manual runs. The wrapper
+uses a small directory lock around compilation so concurrent first runs do not
+write the same cached binary at the same time. The Swift code uses TIS APIs for
+`current`, `list`, and `select`. `--refresh` only creates a tiny temporary AppKit
+window and waits; it intentionally contains no CJKV or policy logic. The Python
+plugin remains the policy owner and may later decide when to add `--refresh` to
+select calls. The actions
 `set-backend-helper` and `set-backend-macism` switch `config.json` between the
 helper and the default `macism` backend.
 
@@ -530,8 +532,9 @@ Event field extraction:
   hook's dot-name (`pane.focused`, `tab.closed`, etc.); do not depend on the
   serialized spelling of the envelope's `event` field.
 - For `pane.focused`, read the newly focused pane id from `data.pane_id` and the
-  workspace id from `data.workspace_id`. If no pane id is available, fall back to
-  `HERDR_PLUGIN_CONTEXT_JSON.focused_pane_id`, then fail open.
+  workspace id from `data.workspace_id`. If no pane id is available, do not infer
+  one from plugin context; the focus worker revalidates the real current pane
+  before making any input-source decision.
 - For `pane.closed`, read the closed pane id from `data.pane_id` and the
   workspace id from `data.workspace_id`. If no pane id is available, fail open
   and do not delete state.
@@ -833,7 +836,9 @@ The dashboard collects:
 - effective config and session identity
 - backend executable and backend-reported current input source
 - current session state file contents
-- live Herdr workspaces, tabs, and panes from Herdr CLI list commands
+- live Herdr workspaces, tabs, and panes from Herdr CLI list commands. Tabs are
+  collected with one global `tab list` call when available, falling back to
+  per-workspace tab calls only if the global call fails.
 
 Rendered output should stay compact enough for one screen. Header details are
 limited to the current session, enabled/debug/action, default/current input
@@ -1063,7 +1068,8 @@ separate Herdr socket such as
 different session key under `HERDR_PLUGIN_STATE_DIR/sessions/`. That keeps smoke
 pane memory separate from the default Herdr session. The plugin config directory
 is still shared by plugin id, so the smoke runner backs up and restores
-`config.json` around tests that write a fake backend config.
+`config.json` around tests that write a fake backend config. State backup and
+restore are scoped to the current smoke session directory only.
 
 When running inside Codex or another sandbox, the live smoke runner must be able
 to write both:

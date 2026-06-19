@@ -49,7 +49,8 @@ class Command:
 
 @dataclass
 class StateBackup:
-    state_dir: Path
+    session_dir: Path
+    session_existed: bool
     files: dict[Path, bytes]
 
 
@@ -200,19 +201,18 @@ def plugin_logs(plugin_id: str, session: Optional[str], limit: int = 50) -> list
     return [log for log in logs if isinstance(log, dict)]
 
 
-def latest_log_start(plugin_id: str, session: Optional[str]) -> int:
-    starts = [
-        int(log_entry.get("started_unix_ms", 0))
+def current_log_ids(plugin_id: str, session: Optional[str]) -> set[str]:
+    return {
+        str(log_entry.get("log_id"))
         for log_entry in plugin_logs(plugin_id, session, limit=100)
-        if isinstance(log_entry.get("started_unix_ms"), int)
-    ]
-    return max(starts) if starts else 0
+        if isinstance(log_entry.get("log_id"), str)
+    }
 
 
 def wait_for_event_after(
     plugin_id: str,
     event_name: str,
-    after_unix_ms: int,
+    before_log_ids: set[str],
     session: Optional[str],
     timeout: float = 5.0,
 ) -> dict[str, Any]:
@@ -223,7 +223,8 @@ def wait_for_event_after(
             log_entry
             for log_entry in plugin_logs(plugin_id, session, limit=100)
             if log_entry.get("event") == event_name
-            and int(log_entry.get("started_unix_ms", 0)) > after_unix_ms
+            and isinstance(log_entry.get("log_id"), str)
+            and log_entry.get("log_id") not in before_log_ids
         ]
         if candidates:
             newest = max(candidates, key=lambda item: int(item.get("started_unix_ms", 0)))
@@ -311,38 +312,37 @@ def action_stdout_json(log_entry: dict[str, Any], action_id: str) -> dict[str, A
     return data
 
 
-def state_dir_from_status(status: dict[str, Any]) -> Path:
+def session_dir_from_status(status: dict[str, Any]) -> Path:
     focus_log_path = status.get("focus_log_path")
     if isinstance(focus_log_path, str) and focus_log_path:
-        path = Path(focus_log_path)
-        if len(path.parents) >= 3:
-            return path.parents[2]
+        return Path(focus_log_path).parent
     raise SmokeFailure("status output did not include a usable focus_log_path")
 
 
-def tracked_state_files(state_dir: Path) -> list[Path]:
-    sessions_dir = state_dir / "sessions"
-    if not sessions_dir.exists():
+def tracked_state_files(session_dir: Path) -> list[Path]:
+    if not session_dir.exists():
         return []
     paths = []
-    for session_dir in sessions_dir.iterdir():
-        if not session_dir.is_dir():
-            continue
-        for name in ("state.json", "focus.dirty"):
-            path = session_dir / name
-            if path.exists():
-                paths.append(path)
+    for name in ("state.json", "focus.dirty"):
+        path = session_dir / name
+        if path.exists():
+            paths.append(path)
     return paths
 
 
-def backup_state(state_dir: Path) -> StateBackup:
+def backup_state(session_dir: Path) -> StateBackup:
+    session_existed = session_dir.exists()
     files = {
-        path.relative_to(state_dir): path.read_bytes()
-        for path in tracked_state_files(state_dir)
+        path.relative_to(session_dir): path.read_bytes()
+        for path in tracked_state_files(session_dir)
         if path.is_file()
     }
-    log(f"state backup captured: {state_dir} ({len(files)} files)")
-    return StateBackup(state_dir=state_dir, files=files)
+    log(f"state backup captured: {session_dir} ({len(files)} files)")
+    return StateBackup(
+        session_dir=session_dir,
+        session_existed=session_existed,
+        files=files,
+    )
 
 
 def write_state_backup_file(path: Path, data: bytes) -> None:
@@ -360,39 +360,43 @@ def write_state_backup_file(path: Path, data: bytes) -> None:
 
 
 def restore_state(backup: StateBackup) -> None:
-    current_files = tracked_state_files(backup.state_dir)
+    current_files = tracked_state_files(backup.session_dir)
     for path in current_files:
-        relative = path.relative_to(backup.state_dir)
+        relative = path.relative_to(backup.session_dir)
         if relative not in backup.files:
             path.unlink()
     for relative, data in backup.files.items():
-        path = backup.state_dir / relative
+        path = backup.session_dir / relative
         write_state_backup_file(path, data)
-    log(f"state backup restored: {backup.state_dir} ({len(backup.files)} files)")
+    if not backup.session_existed and not backup.files:
+        try:
+            backup.session_dir.rmdir()
+        except OSError:
+            pass
+    log(f"state backup restored: {backup.session_dir} ({len(backup.files)} files)")
 
 
 def assert_state_restore_writable(backup: StateBackup) -> None:
     failures = []
     for relative, data in backup.files.items():
-        path = backup.state_dir / relative
+        path = backup.session_dir / relative
         try:
             write_state_backup_file(path, data)
         except Exception as exc:
             failures.append(f"{relative}: {exc}")
-    probe_dir = backup.state_dir / "sessions" / f".smoke-restore-probe-{os.getpid()}-{int(time.time() * 1000)}"
-    probe_path = probe_dir / "state.json"
+    probe_path = backup.session_dir / f".smoke-restore-probe-{os.getpid()}-{int(time.time() * 1000)}"
     try:
         write_state_backup_file(probe_path, b"{}\n")
         probe_path.unlink()
-        probe_dir.rmdir()
     except Exception as exc:
-        failures.append(f"{probe_path.relative_to(backup.state_dir)}: {exc}")
+        failures.append(f"{probe_path.relative_to(backup.session_dir)}: {exc}")
         try:
             probe_path.unlink()
         except FileNotFoundError:
             pass
+    if not backup.session_existed and not backup.files:
         try:
-            probe_dir.rmdir()
+            backup.session_dir.rmdir()
         except OSError:
             pass
     if failures:
@@ -402,7 +406,8 @@ def assert_state_restore_writable(backup: StateBackup) -> None:
 def action_smoke(plugin_id: str, session: Optional[str]) -> StateBackup:
     assert_actions(plugin_id, session)
     status_log = invoke_action(plugin_id, "status", session)
-    state_backup = backup_state(state_dir_from_status(action_stdout_json(status_log, "status")))
+    status = action_stdout_json(status_log, "status")
+    state_backup = backup_state(session_dir_from_status(status))
     assert_state_restore_writable(state_backup)
     invoke_action(plugin_id, "doctor", session)
     return state_backup
@@ -627,10 +632,10 @@ def focus_neighbor_and_wait(
     target_pane_id: str,
     session: Optional[str],
 ) -> None:
-    marker = latest_log_start(plugin_id, session)
+    before_log_ids = current_log_ids(plugin_id, session)
     focus_neighbor(reference_pane_id, direction, session)
     wait_for_focus(target_pane_id, session)
-    wait_for_event_after(plugin_id, "pane.focused", marker, session)
+    wait_for_event_after(plugin_id, "pane.focused", before_log_ids, session)
     wait_for_plugin_idle(plugin_id, session)
 
 
@@ -1154,13 +1159,13 @@ def complex_fake_backend_e2e(plugin_id: str, session: Optional[str]) -> None:
             wait_fake(source_c)
             log("complex fake: three-pane keep memory passed")
 
-            marker = latest_log_start(plugin_id, session)
+            before_log_ids = current_log_ids(plugin_id, session)
             focus_neighbor(pane_c, "left", session)
             focus_neighbor(pane_b, "left", session)
             focus_neighbor(pane_a, "right", session)
             focus_neighbor(pane_b, "right", session)
             wait_for_focus(pane_c, session)
-            wait_for_event_after(plugin_id, "pane.focused", marker, session)
+            wait_for_event_after(plugin_id, "pane.focused", before_log_ids, session)
             wait_fake(source_c)
             log("complex fake: focus storm passed")
 

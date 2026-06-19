@@ -19,8 +19,10 @@ class FakeBackend:
     def __init__(self, currents):
         self.currents = list(currents)
         self.selected = []
+        self.current_calls = 0
 
     def current(self):
+        self.current_calls += 1
         if self.currents:
             return self.currents.pop(0)
         return ""
@@ -52,6 +54,7 @@ class FakeHerdr:
         self.workspaces = []
         self.tabs = []
         self.panes = []
+        self.list_tab_args = []
 
     def current_pane(self):
         pane_id = self.pane_ids.pop(0) if self.pane_ids else ""
@@ -82,6 +85,7 @@ class FakeHerdr:
         return list(self.workspaces)
 
     def list_tabs(self, workspace_id=None):
+        self.list_tab_args.append(workspace_id)
         if workspace_id:
             return [tab for tab in self.tabs if tab.get("workspace_id") == workspace_id]
         return list(self.tabs)
@@ -470,6 +474,26 @@ class EventHandlerTests(TempEnvTest):
         self.assertIn("w1:p2", state["panes"])
         self.assertIsNone(state["last_focused_pane_id"])
 
+    def test_pane_closed_coerces_event_id_before_clearing_last_focus(self):
+        self.write_config(default_action="keep")
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        state = ime_keeper.empty_state(context.identity)
+        state["last_focused_pane_id"] = "123"
+        state["panes"] = {
+            "123": {"input_source_id": "abc", "workspace_id": "w1", "tab_id": "w1:t1"},
+        }
+        store.save(state)
+        event = {"event": "pane_closed", "data": {"pane_id": 123, "workspace_id": "w1"}}
+
+        ime_keeper.handle_event(
+            "pane-closed", self.env, backend=FakeBackend([]), herdr=FakeHerdr([]), event=event
+        )
+
+        state, _ = store.load(readonly=True)
+        self.assertNotIn("123", state["panes"])
+        self.assertIsNone(state["last_focused_pane_id"])
+
     def test_focus_keep_records_previous_source_and_restores_target(self):
         self.write_config(
             default_action="keep",
@@ -506,6 +530,34 @@ class EventHandlerTests(TempEnvTest):
         )
         self.assertEqual(state["last_focused_pane_id"], "w1:p2")
         self.assertEqual(backend.selected, ["com.apple.inputmethod.SCIM.ITABC"])
+
+    def test_focus_keep_same_pane_does_not_read_backend_for_status(self):
+        self.write_config(default_action="keep", default_input_source="abc")
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        state = ime_keeper.empty_state(context.identity)
+        state["last_focused_pane_id"] = "w1:p2"
+        state["panes"] = {
+            "w1:p2": {
+                "input_source_id": "stored",
+                "workspace_id": "w1",
+                "tab_id": "w1:t1",
+            }
+        }
+        store.save(state)
+        backend = FakeBackend([])
+
+        ime_keeper.handle_event(
+            "pane-focused",
+            self.env,
+            backend=backend,
+            herdr=FakeHerdr(["w1:p2", "w1:p2", "w1:p2", "w1:p2"]),
+            event={"event": "pane_focused", "data": {"pane_id": "w1:p2", "workspace_id": "w1"}},
+            debounce_seconds=0,
+        )
+
+        self.assertEqual(backend.current_calls, 0)
+        self.assertEqual(backend.selected, [])
 
     def test_focus_keep_publishes_default_notification_and_pane_status(self):
         self.write_config(
@@ -637,7 +689,7 @@ class EventHandlerTests(TempEnvTest):
         self.assertEqual(state["panes"]["w1:p1"]["workspace_id"], "w1")
         self.assertEqual(state["panes"]["w1:p1"]["tab_id"], "w1:t1")
 
-    def test_context_focused_pane_id_is_used_for_dirty_marker_fallback(self):
+    def test_missing_event_pane_id_marks_dirty_without_context_fallback(self):
         self.write_config(default_action="keep")
         env = dict(
             self.env,
@@ -661,7 +713,7 @@ class EventHandlerTests(TempEnvTest):
 
         self.assertEqual(code, 0)
         dirty = json.loads(store.dirty_path.read_text(encoding="utf-8"))
-        self.assertEqual(dirty["pane_id"], "w1:p9")
+        self.assertNotIn("pane_id", dirty)
 
 
 class CliTests(TempEnvTest):
@@ -793,6 +845,23 @@ class CliTests(TempEnvTest):
         )
         self.assertIn("p1=\033[2mstored ABC\033[0m", color_output)
         self.assertIn("\033[2mCtrl-C to exit\033[0m", color_output)
+
+    def test_dashboard_collects_tabs_once_when_global_tab_list_works(self):
+        self.write_config()
+        herdr = FakeHerdr([])
+        herdr.workspaces = [
+            {"workspace_id": "w1", "number": 1},
+            {"workspace_id": "w2", "number": 2},
+        ]
+        herdr.tabs = [
+            {"workspace_id": "w1", "tab_id": "w1:t1"},
+            {"workspace_id": "w2", "tab_id": "w2:t1"},
+        ]
+
+        data = ime_keeper.collect_dashboard_data(self.env, FakeBackend(["abc"]), herdr)
+
+        self.assertEqual([tab.get("tab_id") for tab in data["tabs"]], ["w1:t1", "w2:t1"])
+        self.assertEqual(herdr.list_tab_args, [None])
 
     def test_set_backend_helper_and_macism_write_backend_config(self):
         self.write_config()

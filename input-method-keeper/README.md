@@ -302,7 +302,8 @@ contexts, so running `macism` directly from another terminal may test that other
 app instead of Herdr.
 
 Use the dedicated `ime-smoke` session for live smoke tests so pane memory is
-kept separate from the default Herdr session. In a sandboxed runner, the plugin
+kept separate from the default Herdr session. The smoke runner only backs up and
+restores the selected session's state files. In a sandboxed runner, the plugin
 state and config directories must be writable; otherwise the smoke runner fails
 its restore preflight before destructive E2E actions run.
 

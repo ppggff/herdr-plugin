@@ -72,43 +72,82 @@ class CliOptionTests(unittest.TestCase):
         self.assertIn("--real-actions requires --full-ime", stderr.getvalue())
 
 
+class PluginLogWaitTests(unittest.TestCase):
+    def test_wait_for_event_after_uses_log_ids_not_start_milliseconds(self):
+        original_plugin_logs = herdr_smoke.plugin_logs
+
+        def fake_plugin_logs(plugin_id, session, limit=50):
+            return [
+                {
+                    "log_id": "old",
+                    "event": "pane.focused",
+                    "started_unix_ms": 1000,
+                    "status": "completed",
+                    "exit_code": 0,
+                },
+                {
+                    "log_id": "new",
+                    "event": "pane.focused",
+                    "started_unix_ms": 1000,
+                    "status": "completed",
+                    "exit_code": 0,
+                },
+            ]
+
+        try:
+            herdr_smoke.plugin_logs = fake_plugin_logs
+
+            event = herdr_smoke.wait_for_event_after(
+                "local.input-method-keeper",
+                "pane.focused",
+                {"old"},
+                None,
+                timeout=0.1,
+            )
+        finally:
+            herdr_smoke.plugin_logs = original_plugin_logs
+
+        self.assertEqual(event["log_id"], "new")
+
+
 class StateBackupTests(unittest.TestCase):
-    def test_backup_restore_tracks_only_session_state_files(self):
+    def test_backup_restore_tracks_only_current_session_state_files(self):
         with TemporaryDirectory() as temp_dir:
             state_dir = Path(temp_dir)
             session_a = state_dir / "sessions" / "default-a"
             session_b = state_dir / "sessions" / "default-b"
             session_a.mkdir(parents=True)
+            session_b.mkdir()
             (state_dir / "run.lock").write_text("lock-before", encoding="utf-8")
             (session_a / "state.json").write_text('{"panes":{"p1":{}}}\n', encoding="utf-8")
             (session_a / "focus.dirty").write_text("dirty-before", encoding="utf-8")
             (session_a / "focus.log").write_text("log-before\n", encoding="utf-8")
+            (session_b / "state.json").write_text('{"panes":{"other":{}}}\n', encoding="utf-8")
 
-            backup = herdr_smoke.backup_state(state_dir)
+            backup = herdr_smoke.backup_state(session_a)
 
             (state_dir / "run.lock").write_text("lock-after", encoding="utf-8")
             (session_a / "state.json").write_text('{"panes":{"p2":{}}}\n', encoding="utf-8")
             (session_a / "focus.dirty").unlink()
             (session_a / "focus.log").write_text("log-after\n", encoding="utf-8")
-            session_b.mkdir()
             (session_b / "state.json").write_text('{"panes":{"test":{}}}\n', encoding="utf-8")
 
             herdr_smoke.restore_state(backup)
 
             self.assertEqual((session_a / "state.json").read_text(encoding="utf-8"), '{"panes":{"p1":{}}}\n')
             self.assertEqual((session_a / "focus.dirty").read_text(encoding="utf-8"), "dirty-before")
-            self.assertFalse((session_b / "state.json").exists())
+            self.assertEqual((session_b / "state.json").read_text(encoding="utf-8"), '{"panes":{"test":{}}}\n')
             self.assertEqual((session_a / "focus.log").read_text(encoding="utf-8"), "log-after\n")
             self.assertEqual((state_dir / "run.lock").read_text(encoding="utf-8"), "lock-after")
 
-    def test_state_dir_from_status_uses_focus_log_path(self):
+    def test_session_dir_from_status_uses_focus_log_parent(self):
         status = {
             "focus_log_path": "/tmp/herdr/plugins/local.input-method-keeper/sessions/default/focus.log"
         }
 
         self.assertEqual(
-            herdr_smoke.state_dir_from_status(status),
-            Path("/tmp/herdr/plugins/local.input-method-keeper"),
+            herdr_smoke.session_dir_from_status(status),
+            Path("/tmp/herdr/plugins/local.input-method-keeper/sessions/default"),
         )
 
     def test_write_state_backup_file_falls_back_when_tmp_write_is_denied(self):
@@ -137,12 +176,12 @@ class StateBackupTests(unittest.TestCase):
             session_a.mkdir(parents=True)
             state_path = session_a / "state.json"
             state_path.write_text('{"panes":{"p1":{}}}\n', encoding="utf-8")
-            backup = herdr_smoke.backup_state(state_dir)
+            backup = herdr_smoke.backup_state(session_a)
 
             herdr_smoke.assert_state_restore_writable(backup)
 
             self.assertEqual(state_path.read_text(encoding="utf-8"), '{"panes":{"p1":{}}}\n')
-            self.assertFalse(list((state_dir / "sessions").glob(".smoke-restore-probe-*")))
+            self.assertFalse(list(session_a.glob(".smoke-restore-probe-*")))
 
     def test_state_restore_preflight_fails_before_destructive_actions_when_unwritable(self):
         with TemporaryDirectory() as temp_dir:
@@ -150,7 +189,7 @@ class StateBackupTests(unittest.TestCase):
             session_a = state_dir / "sessions" / "default-a"
             session_a.mkdir(parents=True)
             (session_a / "state.json").write_text('{"panes":{"p1":{}}}\n', encoding="utf-8")
-            backup = herdr_smoke.backup_state(state_dir)
+            backup = herdr_smoke.backup_state(session_a)
             original_write_state_backup_file = herdr_smoke.write_state_backup_file
 
             def fake_write_state_backup_file(path, data):

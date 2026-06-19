@@ -708,34 +708,6 @@ def event_from_env(env: Mapping[str, str]) -> Optional[Dict[str, Any]]:
     return value if isinstance(value, dict) else None
 
 
-def context_from_env(env: Mapping[str, str]) -> Dict[str, Any]:
-    raw = env.get("HERDR_PLUGIN_CONTEXT_JSON", "")
-    if not raw:
-        return {}
-    try:
-        value = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    return value if isinstance(value, dict) else {}
-
-
-def apply_context_fallback(
-    event_name: str,
-    parsed: Dict[str, Any],
-    env: Mapping[str, str],
-) -> Dict[str, Any]:
-    if event_name != "pane.focused" or parsed.get("pane_id"):
-        return parsed
-    context = context_from_env(env)
-    focused_pane_id = context.get("focused_pane_id")
-    if isinstance(focused_pane_id, str) and focused_pane_id:
-        parsed["pane_id"] = focused_pane_id
-    workspace_id = context.get("workspace_id")
-    if not parsed.get("workspace_id") and isinstance(workspace_id, str) and workspace_id:
-        parsed["workspace_id"] = workspace_id
-    return parsed
-
-
 def reconcile_state_policy(config: Mapping[str, Any], store: StateStore, cause: str) -> str:
     if not bool(config.get("enabled", True)):
         store.clear()
@@ -1276,7 +1248,7 @@ def handle_event(
     herdr = herdr if herdr is not None else HerdrClient(actual_env)
     event_name = event_dot_name(command_event)
     event_payload = dict(event or event_from_env(actual_env) or {})
-    parsed = apply_context_fallback(event_name, parse_event(event_name, event_payload), actual_env)
+    parsed = parse_event(event_name, event_payload)
     if command_event == "pane-focused":
         return handle_pane_focused(context, store, backend, herdr, parsed, debounce_seconds)
     if command_event == "pane-closed":
@@ -1427,19 +1399,6 @@ def handle_pane_focused(
                 if state.get("last_focused_pane_id") == stable_pane_id:
                     stored_source = current_pane_stored_source(state, stable_pane_id)
                     status_input_source = stored_source
-                    try:
-                        status_input_source = backend.current()
-                    except Exception as exc:
-                        log_debug(
-                            store,
-                            config,
-                            {
-                                **focus_debug_base(config, "keep", stable_pane_id, stable_pane_id),
-                                "stored_target_input_source": stored_source,
-                                "reason": "same-pane-status-current-failed",
-                                "error": f"backend_current_failed: {exc}",
-                            },
-                        )
                     store.save(state)
                     store.clear_dirty()
                     log_debug(
@@ -1452,7 +1411,7 @@ def handle_pane_focused(
                                 stable_pane_id,
                                 state.get("last_focused_pane_id"),
                             ),
-                            "backend_current_before_select": status_input_source,
+                            "backend_current_before_select": None,
                             "stored_target_input_source": stored_source,
                             "reason": "same-pane",
                         },
@@ -1465,7 +1424,7 @@ def handle_pane_focused(
                         status_input_source,
                         "keep",
                         stored_source,
-                        backend_current_before_select=status_input_source,
+                        backend_current_before_select=None,
                         reason="same-pane",
                     )
                     if should_loop_again(store, herdr, stable_pane_id, deadline):
@@ -1645,8 +1604,8 @@ def handle_cleanup_event(
         removed_ids: List[str] = []
         cleared_last_focused = False
         if cleanup_kind == "pane":
-            pane_id = parsed.get("pane_id")
-            if not pane_id:
+            pane_id_raw = parsed.get("pane_id")
+            if pane_id_raw is None or pane_id_raw == "":
                 log_debug(
                     store,
                     config,
@@ -1657,14 +1616,15 @@ def handle_cleanup_event(
                     },
                 )
                 return 0
+            pane_id = str(pane_id_raw)
             if panes.pop(str(pane_id), None) is not None:
                 removed_ids.append(str(pane_id))
             if state.get("last_focused_pane_id") == pane_id:
                 state["last_focused_pane_id"] = None
                 cleared_last_focused = True
         elif cleanup_kind == "tab":
-            tab_id = parsed.get("tab_id")
-            if not tab_id:
+            tab_id_raw = parsed.get("tab_id")
+            if tab_id_raw is None or tab_id_raw == "":
                 log_debug(
                     store,
                     config,
@@ -1675,6 +1635,7 @@ def handle_cleanup_event(
                     },
                 )
                 return 0
+            tab_id = str(tab_id_raw)
             remove_ids = [
                 pane_id
                 for pane_id, pane_state in panes.items()
@@ -1688,8 +1649,8 @@ def handle_cleanup_event(
                 state["last_focused_pane_id"] = None
                 cleared_last_focused = True
         elif cleanup_kind == "workspace":
-            workspace_id = parsed.get("workspace_id")
-            if not workspace_id:
+            workspace_id_raw = parsed.get("workspace_id")
+            if workspace_id_raw is None or workspace_id_raw == "":
                 log_debug(
                     store,
                     config,
@@ -1700,6 +1661,7 @@ def handle_cleanup_event(
                     },
                 )
                 return 0
+            workspace_id = str(workspace_id_raw)
             remove_ids = [
                 pane_id
                 for pane_id, pane_state in panes.items()
@@ -1971,8 +1933,11 @@ def collect_dashboard_data(
 
     workspaces = call_herdr_list(diagnostics, "workspace_list", herdr.list_workspaces)
     panes = call_herdr_list(diagnostics, "pane_list", herdr.list_panes)
-    tabs: List[Dict[str, Any]] = []
-    if workspaces:
+    tab_diag_start = len(diagnostics)
+    tabs = call_herdr_list(diagnostics, "tab_list", herdr.list_tabs)
+    if not tabs and len(diagnostics) > tab_diag_start and workspaces:
+        diagnostics.append("tab_list_fallback: per-workspace")
+        tabs = []
         for workspace in workspaces:
             workspace_id = workspace.get("workspace_id")
             if workspace_id:
@@ -1984,8 +1949,6 @@ def collect_dashboard_data(
                         str(workspace_id),
                     )
                 )
-    else:
-        tabs = call_herdr_list(diagnostics, "tab_list", herdr.list_tabs)
 
     return {
         "config": config,
@@ -2195,11 +2158,15 @@ def doctor(
     gc_all: bool = False,
     select_self_test: bool = False,
 ) -> int:
-    context = HerdrContext.from_env(env, readonly_config=False)
-    store = StateStore(context.state_dir, context.identity)
-    herdr = herdr if herdr is not None else HerdrClient(env)
-    with FileLock(run_lock_path(context.state_dir), blocking=True):
-        config = ensure_config(context.config_dir)
+    actual_env = dict(env)
+    config_dir = Path(actual_env.get("HERDR_PLUGIN_CONFIG_DIR", "."))
+    state_dir = Path(actual_env.get("HERDR_PLUGIN_STATE_DIR", "."))
+    herdr = herdr if herdr is not None else HerdrClient(actual_env)
+    with FileLock(run_lock_path(state_dir), blocking=True):
+        config = ensure_config(config_dir)
+        identity = session_identity(config, actual_env)
+        context = HerdrContext(actual_env, config_dir, state_dir, config, identity)
+        store = StateStore(state_dir, identity)
         state, diagnostic = store.load(readonly=False)
         mode = reconcile_state_policy(config, store, "doctor")
         result = {
@@ -2282,37 +2249,40 @@ def gc_sessions(state_dir: Path, current_key: str, days: int = 30) -> List[str]:
 
 
 def mutate_config(env: Mapping[str, str], mutation: str, value: Optional[str], backend: Any) -> int:
-    context = HerdrContext.from_env(env, readonly_config=False)
-    store = StateStore(context.state_dir, context.identity)
-    with FileLock(run_lock_path(context.state_dir), blocking=True):
-        config = ensure_config(context.config_dir)
+    actual_env = dict(env)
+    config_dir = Path(actual_env.get("HERDR_PLUGIN_CONFIG_DIR", "."))
+    state_dir = Path(actual_env.get("HERDR_PLUGIN_STATE_DIR", "."))
+    with FileLock(run_lock_path(state_dir), blocking=True):
+        config = ensure_config(config_dir)
+        identity = session_identity(config, actual_env)
+        store = StateStore(state_dir, identity)
         reconcile_state_policy(config, store, mutation)
         if mutation == "toggle-enabled":
             config["enabled"] = not bool(config.get("enabled", True))
-            write_config(context.config_dir, config)
+            write_config(config_dir, config)
             store.clear()
         elif mutation == "debug-on":
             config["debug"] = True
-            write_config(context.config_dir, config)
+            write_config(config_dir, config)
         elif mutation == "debug-off":
             config["debug"] = False
-            write_config(context.config_dir, config)
+            write_config(config_dir, config)
         elif mutation == "set-default-action":
             if value not in VALID_ACTIONS:
                 print(f"invalid default action: {value}", file=sys.stderr)
                 return 2
             config["default_action"] = value
-            write_config(context.config_dir, config)
+            write_config(config_dir, config)
             reconcile_state_policy(config, store, mutation)
         elif mutation == "set-default-input-source":
             config["default_input_source"] = backend.current()
-            write_config(context.config_dir, config)
+            write_config(config_dir, config)
         elif mutation == "set-backend-helper":
             config["backend"] = helper_backend_config()
-            write_config(context.config_dir, config)
+            write_config(config_dir, config)
         elif mutation == "set-backend-macism":
             config["backend"] = macism_backend_config()
-            write_config(context.config_dir, config)
+            write_config(config_dir, config)
         else:
             return 2
     return 0
