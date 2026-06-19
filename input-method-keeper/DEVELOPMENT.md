@@ -1050,18 +1050,48 @@ After installing or reloading the plugin in Herdr, run these live checks:
 The repository also includes an automated Herdr smoke runner:
 
 ```sh
-input-method-keeper/scripts/herdr_smoke.py --link
+input-method-keeper/scripts/herdr_smoke.py --session ime-smoke --link
 ```
 
 This links/enables the local plugin if needed, verifies the manifest action
 list, invokes `status` and `doctor` through Herdr, then polls Herdr plugin logs
 until those actions finish with exit code 0.
 
+Use a dedicated Herdr session for live smoke tests. `--session ime-smoke` uses a
+separate Herdr socket such as
+`~/.config/herdr/sessions/ime-smoke/herdr.sock`, so the plugin derives a
+different session key under `HERDR_PLUGIN_STATE_DIR/sessions/`. That keeps smoke
+pane memory separate from the default Herdr session. The plugin config directory
+is still shared by plugin id, so the smoke runner backs up and restores
+`config.json` around tests that write a fake backend config.
+
+When running inside Codex or another sandbox, the live smoke runner must be able
+to write both:
+
+```text
+~/.local/state/herdr/plugins/local.input-method-keeper
+~/.config/herdr/plugins/config/local.input-method-keeper
+```
+
+The runner performs a state-restore write preflight after `status` and before
+destructive E2E actions such as `set-default-action-reset` or `toggle-enabled`.
+If the sandbox cannot write the plugin state directory, smoke fails before those
+actions run. Do not bypass this by executing restore scripts through a user pane;
+that can inject commands into the active Herdr pane. Instead, either grant the
+sandbox these writable roots or run live smoke from a normal terminal.
+
+To clean up the dedicated smoke session:
+
+```sh
+herdr session stop ime-smoke
+herdr session delete ime-smoke
+```
+
 To test the real Herdr pane focus/event flow without depending on macOS having
 two switchable input sources available in the current automation context, run:
 
 ```sh
-input-method-keeper/scripts/herdr_smoke.py --link --fake-backend
+input-method-keeper/scripts/herdr_smoke.py --session ime-smoke --link --fake-backend
 ```
 
 This creates a temporary Herdr workspace, writes a temporary plugin config that
@@ -1073,7 +1103,7 @@ the temporary workspace.
 For a broader regression pass over plugin logic, run:
 
 ```sh
-input-method-keeper/scripts/herdr_smoke.py --link --complex-fake
+input-method-keeper/scripts/herdr_smoke.py --session ime-smoke --link --complex-fake
 ```
 
 This still uses a fake backend, but it drives a live Herdr session through a
@@ -1085,7 +1115,7 @@ state, lock, or action behavior.
 To test the default `macism` backend against real macOS input sources, run:
 
 ```sh
-input-method-keeper/scripts/herdr_smoke.py --link --full-ime
+input-method-keeper/scripts/herdr_smoke.py --session ime-smoke --link --full-ime
 ```
 
 `--full-ime` requires two input source ids that `macism` can actually switch to
@@ -1100,13 +1130,13 @@ explicitly:
 ```sh
 HERDR_IME_KEEPER_TEST_SOURCE_A=com.apple.keylayout.ABC \
 HERDR_IME_KEEPER_TEST_SOURCE_B=com.apple.inputmethod.SCIM.ITABC \
-input-method-keeper/scripts/herdr_smoke.py --link --full-ime
+input-method-keeper/scripts/herdr_smoke.py --session ime-smoke --link --full-ime
 ```
 
 To also exercise real backend action behavior, add `--real-actions`:
 
 ```sh
-input-method-keeper/scripts/herdr_smoke.py --link --full-ime --real-actions
+input-method-keeper/scripts/herdr_smoke.py --session ime-smoke --link --full-ime --real-actions
 ```
 
 This extends the real macOS test with `reset` and `ignore`. It intentionally

@@ -277,9 +277,9 @@ herdr plugin action invoke set-backend-macism --plugin local.input-method-keeper
 Recommended checks:
 
 ```sh
-input-method-keeper/scripts/herdr_smoke.py --link
-input-method-keeper/scripts/herdr_smoke.py --link --complex-fake
-input-method-keeper/scripts/herdr_smoke.py --link --full-ime --real-actions
+input-method-keeper/scripts/herdr_smoke.py --session ime-smoke --link
+input-method-keeper/scripts/herdr_smoke.py --session ime-smoke --link --complex-fake
+input-method-keeper/scripts/herdr_smoke.py --session ime-smoke --link --full-ime --real-actions
 ```
 
 The first command verifies manifest actions. The second drives live Herdr panes
@@ -293,13 +293,18 @@ If auto-detection cannot find two switchable input sources, pass them explicitly
 ```sh
 HERDR_IME_KEEPER_TEST_SOURCE_A=com.apple.keylayout.ABC \
 HERDR_IME_KEEPER_TEST_SOURCE_B=com.apple.inputmethod.SCIM.ITABC \
-input-method-keeper/scripts/herdr_smoke.py --link --full-ime --real-actions
+input-method-keeper/scripts/herdr_smoke.py --session ime-smoke --link --full-ime --real-actions
 ```
 
 `--full-ime` runs `macism` inside a temporary Herdr pane. This is intentional:
 macOS can report different input sources for different foreground apps/input
 contexts, so running `macism` directly from another terminal may test that other
 app instead of Herdr.
+
+Use the dedicated `ime-smoke` session for live smoke tests so pane memory is
+kept separate from the default Herdr session. In a sandboxed runner, the plugin
+state and config directories must be writable; otherwise the smoke runner fails
+its restore preflight before destructive E2E actions run.
 
 ## Troubleshooting
 
