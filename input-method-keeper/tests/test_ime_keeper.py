@@ -223,6 +223,50 @@ class StateStoreTests(TempEnvTest):
         self.assertFalse(store.dirty_path.exists())
 
 
+class PaneRecordsTests(TempEnvTest):
+    def test_focus_memory_is_committed_as_one_record_update(self):
+        self.write_config(default_action="keep")
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        state = ime_keeper.empty_state(context.identity)
+        state["last_focused_pane_id"] = "w1:p1"
+        state["panes"] = {
+            "w1:p1": {
+                "input_source_id": "old-source",
+                "workspace_id": "w1",
+                "tab_id": "w1:t1",
+            },
+            "w1:p2": {
+                "input_source_id": "target-source",
+                "workspace_id": "w1",
+                "tab_id": "w1:t1",
+            },
+        }
+        store.save(state)
+        records = ime_keeper.PaneRecords(store)
+
+        memory = records.focus_memory("w1:p2")
+        records.commit_focus(
+            memory,
+            {
+                "pane_id": "w1:p2",
+                "workspace_id": "w1",
+                "tab_id": "w1:t1",
+                "cwd": "/repo/new",
+                "agent": "codex",
+            },
+            observed_previous_source="observed-source",
+            selected_source="target-source",
+        )
+
+        snapshot, diagnostic = records.snapshot()
+        self.assertIsNone(diagnostic)
+        self.assertEqual(snapshot["last_focused_pane_id"], "w1:p2")
+        self.assertEqual(snapshot["panes"]["w1:p1"]["input_source_id"], "observed-source")
+        self.assertEqual(snapshot["panes"]["w1:p2"]["input_source_id"], "target-source")
+        self.assertEqual(snapshot["panes"]["w1:p2"]["cwd"], "/repo/new")
+
+
 class BackendTests(unittest.TestCase):
     def test_ensure_input_source_skips_select_when_already_current(self):
         backend = FakeBackend(["com.apple.keylayout.ABC"])
@@ -264,6 +308,19 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config["pane_status_on_focus"])
         self.assertFalse(config["focus_log"])
 
+    def test_switching_from_stateless_policy_clears_stale_records(self):
+        config = ime_keeper.default_config()
+        config["default_action"] = "reset"
+
+        updated, clear_records = ime_keeper.apply_config_mutation(
+            config,
+            "set-default-action",
+            value="keep",
+        )
+
+        self.assertEqual(updated["default_action"], "keep")
+        self.assertTrue(clear_records)
+
 
 class DebugLoggingTests(TempEnvTest):
     def test_debug_log_rotation_threshold_is_100mb(self):
@@ -289,13 +346,13 @@ class DebugLoggingTests(TempEnvTest):
         old_path = store.session_dir / "debug.20260618T010203000001Z.log"
         old_path.write_text("old log line\n", encoding="utf-8")
         store.debug_current_path.write_text(old_path.name + "\n", encoding="utf-8")
-        original_limit = ime_keeper.DEBUG_LOG_MAX_BYTES
+        original_limit = ime_keeper.records.DEBUG_LOG_MAX_BYTES
 
         try:
-            ime_keeper.DEBUG_LOG_MAX_BYTES = 1
+            ime_keeper.records.DEBUG_LOG_MAX_BYTES = 1
             ime_keeper.log_debug(store, context.config, {"event": "test"})
         finally:
-            ime_keeper.DEBUG_LOG_MAX_BYTES = original_limit
+            ime_keeper.records.DEBUG_LOG_MAX_BYTES = original_limit
 
         rotated = list(store.session_dir.glob("debug.*.log"))
         self.assertEqual(len(rotated), 2)

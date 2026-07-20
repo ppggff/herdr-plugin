@@ -65,13 +65,33 @@ Herdr event/action
   -> bin/ime-keeper
       -> resolves Python 3.9+
       -> src/ime_keeper.py
-          -> HerdrContext
-          -> JSON Config
-          -> Session-scoped StateStore
-          -> InputSourceBackend
-              -> BackendExecutor
+          -> ime_keeper.cli
+              -> focus          pane.focused coordination and revalidation
+              -> records        authoritative pane memory and cleanup/move events
+              -> config         config defaults, validation, and mutation semantics
+              -> dashboard      read-only live/stored record view
+              -> herdr          Herdr queries and UI side effects
+              -> input_source   current/select backend adapter
                   -> macism by default
+              -> _files         atomic writes and file locks (internal)
 ```
+
+`src/ime_keeper.py` is only a compatibility executable. Runtime code lives in
+the `ime_keeper/` package. `cli` parses commands and events and wires the other
+modules together; it does not implement focus or record rules.
+
+`PaneRecords` is the only interface outside `records.py` that reads or mutates
+the contents of `state.json`. The focus path reads a small `FocusMemory` snapshot
+and commits the old-pane observation, new-pane metadata, and
+`last_focused_pane_id` together after the input-source operation succeeds.
+Cleanup and move events call record operations instead of editing the state
+dictionary themselves. `dashboard` and `status` use read-only snapshots.
+
+The dependency direction stays shallow: `cli` dispatches to feature modules;
+`focus` and `dashboard` use `config`, `records`, and the real adapters; `config`
+and `records` use `_files`. There is deliberately no plan/result hierarchy or
+general workflow engine—the focus procedure remains one explicit coordinator
+because its repeated Herdr reads and lock ordering are part of its correctness.
 
 The Python code should stay dependency-light and use standard library modules:
 
@@ -1198,10 +1218,11 @@ context.
   focus after that operation. That behavior is acceptable and should be designed
   deliberately.
 
-## Implementation Order
+## Original Implementation Order
 
 1. Add manifest, `bin/ime-keeper` wrapper, default config example, and
-   `src/ime_keeper.py` CLI skeleton.
+   `src/ime_keeper.py` CLI skeleton (now the compatibility executable for the
+   `src/ime_keeper/` package).
 2. Implement Python and Herdr binary resolution, including `HERDR_BIN_PATH`.
 3. Implement backend commands: `current`, `select`, `doctor`.
 4. Implement session label/key derivation from `session_name` and
