@@ -618,6 +618,68 @@ def current_pane(session: Optional[str]) -> dict[str, Any]:
     return pane
 
 
+def pane_metadata_contract_smoke(session: Optional[str]) -> None:
+    workspace_id: Optional[str] = None
+    pane_id: Optional[str] = None
+    try:
+        label = f"ime-keeper-contract-{int(time.time())}"
+        workspace_id = workspace_id_from(
+            herdr(
+                ["workspace", "create", "--cwd", "/tmp", "--label", label],
+                session=session,
+                echo=False,
+            )
+        )
+        panes = panes_for_workspace(workspace_id, session)
+        if not panes or not isinstance(panes[0].get("pane_id"), str):
+            raise SmokeFailure("metadata contract workspace has no pane")
+        pane_id = panes[0]["pane_id"]
+        herdr(
+            [
+                "pane",
+                "report-metadata",
+                pane_id,
+                "--source",
+                "ppggff.input-method-keeper.contract-smoke",
+                "--token",
+                "ime=contract-probe",
+                "--ttl-ms",
+                "5000",
+            ],
+            session=session,
+            echo=False,
+        )
+        result = result_object(herdr(["pane", "get", pane_id], session=session, echo=False))
+        pane = result.get("pane")
+        tokens = pane.get("tokens") if isinstance(pane, dict) else None
+        if not isinstance(tokens, dict) or tokens.get("ime") != "contract-probe":
+            raise SmokeFailure(f"pane metadata token contract mismatch: tokens={tokens!r}")
+        log("pane metadata token contract passed")
+    finally:
+        if pane_id:
+            herdr(
+                [
+                    "pane",
+                    "report-metadata",
+                    pane_id,
+                    "--source",
+                    "ppggff.input-method-keeper.contract-smoke",
+                    "--clear-token",
+                    "ime",
+                ],
+                session=session,
+                check=False,
+                echo=False,
+            )
+        if workspace_id:
+            herdr(
+                ["workspace", "close", workspace_id],
+                session=session,
+                check=False,
+                echo=False,
+            )
+
+
 def focus_neighbor(reference_pane_id: str, direction: str, session: Optional[str]) -> None:
     herdr(
         ["pane", "focus", "--direction", direction, "--pane", reference_pane_id],
@@ -1155,6 +1217,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         herdr(["--version"], session=args.session)
         ensure_plugin_linked(args.plugin_id, args.plugin_path, args.session, args.link)
         state_backup = action_smoke(args.plugin_id, args.session)
+        pane_metadata_contract_smoke(args.session)
         if args.fake_backend:
             fake_backend_e2e(args.plugin_id, args.session)
         if args.complex_fake:

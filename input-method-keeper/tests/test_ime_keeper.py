@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -96,6 +97,14 @@ class FakeHerdr:
         return list(self.panes)
 
 
+class FailingPublicationHerdr(FakeHerdr):
+    def show_notification(self, title, body):
+        return ime_keeper.CommandResult(False, "", "notification unavailable", 1)
+
+    def report_pane_status(self, pane_id, status, ttl_ms):
+        return ime_keeper.CommandResult(False, "", "metadata unavailable", 1)
+
+
 class TempEnvTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -119,6 +128,37 @@ class TempEnvTest(unittest.TestCase):
         path = self.config_dir / "config.json"
         path.write_text(json.dumps(config), encoding="utf-8")
         return config
+
+
+class HerdrClientTests(unittest.TestCase):
+    def test_report_pane_status_publishes_named_ime_token(self):
+        client = ime_keeper.HerdrClient({"HERDR_BIN_PATH": "/usr/local/bin/herdr"})
+        completed = mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch("ime_keeper.herdr.subprocess.run", return_value=completed) as run:
+            result = client.report_pane_status("w1:p2", "ITABC", 600000)
+
+        self.assertTrue(result.ok)
+        run.assert_called_once_with(
+            [
+                "/usr/local/bin/herdr",
+                "pane",
+                "report-metadata",
+                "w1:p2",
+                "--source",
+                "ppggff.input-method-keeper",
+                "--token",
+                "ime=ITABC",
+                "--ttl-ms",
+                "600000",
+            ],
+            text=True,
+            stdout=ime_keeper.herdr.subprocess.PIPE,
+            stderr=ime_keeper.herdr.subprocess.PIPE,
+            timeout=1.5,
+            check=False,
+            env=mock.ANY,
+        )
 
 
 class SessionIdentityTests(TempEnvTest):
@@ -417,6 +457,44 @@ class EventParsingTests(unittest.TestCase):
 
 
 class EventHandlerTests(TempEnvTest):
+    def test_focus_publication_failures_are_logged_without_failing_event(self):
+        self.write_config(
+            default_action="reset",
+            default_input_source="com.apple.keylayout.ABC",
+            debug=False,
+        )
+        env = {
+            **self.env,
+            "HERDR_PLUGIN_EVENT_JSON": json.dumps(
+                {
+                    "event": "pane_focused",
+                    "data": {"pane_id": "w1:p1", "workspace_id": "w1"},
+                }
+            ),
+        }
+        stderr = io.StringIO()
+
+        with contextlib.redirect_stderr(stderr):
+            code = ime_keeper.main(
+                ["event", "pane-focused"],
+                env=env,
+                backend=FakeBackend(["com.apple.keylayout.ABC"]),
+                herdr=FailingPublicationHerdr(["w1:p1"] * 5),
+            )
+
+        warning = json.loads(stderr.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(warning["level"], "warning")
+        self.assertEqual(warning["event"], "focus-status")
+        self.assertEqual(warning["pane_id"], "w1:p1")
+        self.assertEqual(
+            warning["errors"],
+            [
+                "pane_status_failed: metadata unavailable",
+                "notification_failed: notification unavailable",
+            ],
+        )
+
     def test_focus_reset_backend_failure_fails_open(self):
         self.write_config(default_action="reset", default_input_source="abc", debug=True)
         event = {"event": "pane_focused", "data": {"pane_id": "w1:p1", "workspace_id": "w1"}}
@@ -648,7 +726,7 @@ class EventHandlerTests(TempEnvTest):
 
         self.assertEqual(
             herdr.pane_statuses,
-            [{"pane_id": "w1:p2", "status": "IME ITABC", "ttl_ms": 600000}],
+            [{"pane_id": "w1:p2", "status": "ITABC", "ttl_ms": 600000}],
         )
         self.assertEqual(herdr.notifications[0]["title"], "OLD  INIT: unknown -> ABC (p1 w1)")
         self.assertEqual(
@@ -849,7 +927,7 @@ class CliTests(TempEnvTest):
                 "tab_id": "w1:t2",
                 "pane_id": "w1:p2",
                 "focused": True,
-                "custom_status": "IME pinyin",
+                "tokens": {"ime": "pinyin"},
                 "agent": "claude",
                 "agent_status": "working",
                 "cwd": "/repo/cn",
@@ -872,7 +950,7 @@ class CliTests(TempEnvTest):
         self.assertIn("default=ABC current=pinyin", output)
         self.assertIn("backend=macism panes=live:1/state:2", output)
         self.assertIn("> workspace 1 (repo)", output)
-        self.assertIn("> tab 2 (cn): >[p2]=IME pinyin", output)
+        self.assertIn("> tab 2 (cn): >[p2]=pinyin", output)
         self.assertIn("tab 1 (en): p1=stored ABC", output)
         self.assertIn("Ctrl-C to exit", output)
         self.assertNotIn("focus-tail-entry", output)
@@ -897,7 +975,7 @@ class CliTests(TempEnvTest):
         first_two_lines = "\n".join(color_output.splitlines()[:2])
         self.assertNotIn("\033[", first_two_lines)
         self.assertIn(
-            "\033[1;34m>\033[0m\033[1;34m[\033[0mp2\033[1;34m]\033[0m=\033[32mIME pinyin\033[0m",
+            "\033[1;34m>\033[0m\033[1;34m[\033[0mp2\033[1;34m]\033[0m=\033[32mpinyin\033[0m",
             color_output,
         )
         self.assertIn("p1=\033[2mstored ABC\033[0m", color_output)

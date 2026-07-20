@@ -273,6 +273,24 @@ Most users should only change:
 Herdr session using the Herdr socket path, so different sessions do not share
 pane memory.
 
+When `pane_status_on_focus` is enabled, the plugin reports the short input-source
+name as the pane metadata token `ime`. Herdr exposes it as `tokens.ime` from
+`pane get`, `pane current`, and `pane list`. To render it in Herdr's expanded
+desktop Agent sidebar, add `$ime` to the Agent row layout in Herdr's main config:
+
+```toml
+[ui.sidebar.agents]
+rows = [
+  ["state_icon", "workspace", "tab"],
+  ["agent", "$ime"],
+]
+```
+
+`rows` replaces the complete Agent layout, so merge `$ime` into any custom rows
+you already use. Custom metadata tokens are opt-in presentation values: Herdr's
+default layout, collapsed sidebar, and mobile view do not render `$ime`. The
+plugin Dashboard reads `tokens.ime` directly and does not require this layout.
+
 JSON does not support comments. Keep notes outside `config.json`.
 
 ## Backend
@@ -481,9 +499,18 @@ The action field is fixed to four characters for readability: `INIT`, `CHNG`,
 `SAME`, `SWCH`, `NONE`, `MISS`, or `UNKN`. `OLD` describes the pane losing
 focus; `NEW` describes the pane gaining focus. Pane markers put the pane first
 and workspace second, for example `w1:p2` is shown as `(p2 w1)`. The plugin also
-writes `custom_status` to the focused pane metadata, so `herdr pane current`
-shows a value such as `IME ITABC`. Set `notify_on_focus` or
+writes the short source name to the focused pane's `ime` metadata token, so
+`herdr pane current` exposes `"tokens":{"ime":"ITABC"}`. Add `$ime` to the
+expanded Agent sidebar layout to render it there. Set `notify_on_focus` or
 `pane_status_on_focus` to `false` after the trial if that is too noisy.
+
+Input switching fails open when optional notification or metadata publication
+fails. The event still exits successfully, and a structured warning is captured
+in Herdr's plugin logs:
+
+```sh
+herdr plugin log list --plugin ppggff.input-method-keeper --limit 20
+```
 
 If `focus_log` is enabled, every successful focus decision is also appended to
 `focus.log` in the current session state directory as one compact line:

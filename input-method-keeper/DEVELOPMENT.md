@@ -264,15 +264,21 @@ Config semantics:
   plus default source (`NEW  SWCH: A -> B (<pane> <workspace>) | default X`).
   Use fixed four-character action codes: `INIT`, `CHNG`, `SAME`, `SWCH`,
   `NONE`, `MISS`, and `UNKN`.
-- `pane_status_on_focus = true` writes `custom_status = "IME <source>"` to the
-  focused pane metadata after each successful focus decision. This makes the
-  selected input source visible in `herdr pane current` even if the UI does not
-  render that metadata.
+- `pane_status_on_focus = true` writes the short source name to the focused
+  pane's `ime` metadata token after each successful focus decision. Pane API
+  responses expose it as `tokens.ime`; Herdr's expanded Agent sidebar renders it
+  only when the user's row layout includes `$ime`. The plugin Dashboard reads
+  `tokens.ime` directly.
 - `focus_log = true` appends one compact text line per successful focus
   decision to `focus.log` in the current session state directory. This is for
   `tail -f` style observation; it is intentionally separate from JSON debug
   logs.
-- `status_ttl_ms` controls how long the pane metadata status remains valid.
+- `status_ttl_ms` controls how long the pane metadata token remains valid.
+
+Notification and metadata publication are optional side effects. Their failures
+must not fail input switching or the event command, but the event writes one
+structured warning to stderr so Herdr preserves the details in plugin logs even
+when debug logging is disabled.
 
 `keep` is the only mode that uses pane memory state. Switching
 `default_action` to `reset` or `ignore` deletes the current Herdr session's pane
@@ -1083,7 +1089,11 @@ input-method-keeper/scripts/herdr_smoke.py --session ime-smoke --link
 
 This links/enables the local plugin if needed, verifies the manifest action
 list, invokes `status` and `doctor` through Herdr, then polls Herdr plugin logs
-until those actions finish with exit code 0.
+until those actions finish with exit code 0. It also creates a temporary
+workspace, reports `ime=contract-probe` through the real
+`pane report-metadata` CLI, verifies `pane get` returns `tokens.ime`, clears the
+token, and closes the workspace. This contract probe catches Herdr CLI or socket
+schema drift before release.
 
 Use a dedicated Herdr session for live smoke tests. `--session ime-smoke` uses a
 separate Herdr socket such as

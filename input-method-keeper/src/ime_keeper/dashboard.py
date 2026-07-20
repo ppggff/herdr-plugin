@@ -126,7 +126,8 @@ def dashboard_pane_status(
     pane_state: Mapping[str, Any],
     style: DashboardStyle,
 ) -> str:
-    live_status = live.get("custom_status") if isinstance(live, Mapping) else None
+    tokens = live.get("tokens") if isinstance(live, Mapping) else None
+    live_status = tokens.get("ime") if isinstance(tokens, Mapping) else None
     if live_status:
         return style.live(str(live_status))
     stored = pane_state.get("input_source_id")

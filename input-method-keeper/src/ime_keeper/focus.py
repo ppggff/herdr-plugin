@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
@@ -366,7 +367,7 @@ def publish_focus_status(
     select_action: Optional[str] = None,
     reason: Optional[str] = None,
 ) -> None:
-    status = f"IME {short_input_source(input_source_id)}"
+    status = short_input_source(input_source_id)
     title = focus_status_title(
         previous_pane_id,
         previous_stored_input_source,
@@ -419,18 +420,16 @@ def publish_focus_status(
         except Exception as exc:
             failures.append(f"notification_failed: {exc}")
     if failures:
-        log_debug(
-            store,
-            config,
-            {
-                "event": "focus-status",
-                "pane_id": pane_id,
-                "input_source_id": input_source_id,
-                "status": status,
-                "title": title,
-                "errors": failures,
-            },
-        )
+        warning = {
+            "event": "focus-status",
+            "pane_id": pane_id,
+            "input_source_id": input_source_id,
+            "status": status,
+            "title": title,
+            "errors": failures,
+        }
+        log_debug(store, config, warning)
+        print(json.dumps({"level": "warning", **warning}, ensure_ascii=False), file=sys.stderr)
 
 
 def stable_current_pane(herdr: Any, debounce_seconds: float) -> Optional[Dict[str, Any]]:

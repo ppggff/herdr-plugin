@@ -112,6 +112,54 @@ class PluginLogWaitTests(unittest.TestCase):
         self.assertEqual(event["log_id"], "new")
 
 
+class PaneMetadataContractTests(unittest.TestCase):
+    def test_contract_probe_accepts_ime_token_and_closes_temporary_workspace(self):
+        calls = []
+        original_herdr = herdr_smoke.herdr
+
+        def fake_herdr(args, session=None, check=True, echo=True):
+            calls.append(list(args))
+            if args[:2] == ["workspace", "create"]:
+                payload = {"result": {"workspace": {"workspace_id": "w-test"}}}
+            elif args[:2] == ["pane", "list"]:
+                payload = {"result": {"panes": [{"pane_id": "w-test:p1"}]}}
+            elif args[:2] == ["pane", "get"]:
+                payload = {
+                    "result": {
+                        "pane": {
+                            "pane_id": "w-test:p1",
+                            "tokens": {"ime": "contract-probe"},
+                        }
+                    }
+                }
+            else:
+                payload = {"result": {"type": "ok"}}
+            return herdr_smoke.Command(list(args), json.dumps(payload), "", 0)
+
+        try:
+            herdr_smoke.herdr = fake_herdr
+
+            herdr_smoke.pane_metadata_contract_smoke(None)
+        finally:
+            herdr_smoke.herdr = original_herdr
+
+        self.assertIn(
+            [
+                "pane",
+                "report-metadata",
+                "w-test:p1",
+                "--source",
+                "ppggff.input-method-keeper.contract-smoke",
+                "--token",
+                "ime=contract-probe",
+                "--ttl-ms",
+                "5000",
+            ],
+            calls,
+        )
+        self.assertIn(["workspace", "close", "w-test"], calls)
+
+
 class StateBackupTests(unittest.TestCase):
     def test_backup_restore_tracks_only_current_session_state_files(self):
         with TemporaryDirectory() as temp_dir:
