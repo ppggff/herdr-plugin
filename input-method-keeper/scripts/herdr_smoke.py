@@ -618,6 +618,21 @@ def current_pane(session: Optional[str]) -> dict[str, Any]:
     return pane
 
 
+def herdr_cleanup_error(
+    label: str,
+    args: list[str],
+    session: Optional[str],
+) -> Optional[str]:
+    try:
+        command = herdr(args, session=session, check=False, echo=False)
+    except Exception as exc:
+        return f"{label} cleanup failed: {exc}"
+    if command.returncode == 0:
+        return None
+    detail = command.stderr.strip() or command.stdout.strip() or f"exit {command.returncode}"
+    return f"{label} cleanup failed: {detail}"
+
+
 def pane_metadata_contract_smoke(session: Optional[str]) -> None:
     workspace_id: Optional[str] = None
     pane_id: Optional[str] = None
@@ -656,8 +671,11 @@ def pane_metadata_contract_smoke(session: Optional[str]) -> None:
             raise SmokeFailure(f"pane metadata token contract mismatch: tokens={tokens!r}")
         log("pane metadata token contract passed")
     finally:
+        active_failure = sys.exc_info()[0] is not None
+        cleanup_failures = []
         if pane_id:
-            herdr(
+            cleanup_error = herdr_cleanup_error(
+                "pane token",
                 [
                     "pane",
                     "report-metadata",
@@ -667,17 +685,24 @@ def pane_metadata_contract_smoke(session: Optional[str]) -> None:
                     "--clear-token",
                     "ime",
                 ],
-                session=session,
-                check=False,
-                echo=False,
+                session,
             )
+            if cleanup_error:
+                cleanup_failures.append(cleanup_error)
         if workspace_id:
-            herdr(
+            cleanup_error = herdr_cleanup_error(
+                "workspace",
                 ["workspace", "close", workspace_id],
-                session=session,
-                check=False,
-                echo=False,
+                session,
             )
+            if cleanup_error:
+                cleanup_failures.append(cleanup_error)
+        if cleanup_failures:
+            message = "; ".join(cleanup_failures)
+            if active_failure:
+                log(f"warning: {message}")
+            else:
+                raise SmokeFailure(message)
 
 
 def focus_neighbor(reference_pane_id: str, direction: str, session: Optional[str]) -> None:

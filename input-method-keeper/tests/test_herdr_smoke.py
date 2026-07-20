@@ -159,6 +159,39 @@ class PaneMetadataContractTests(unittest.TestCase):
         )
         self.assertIn(["workspace", "close", "w-test"], calls)
 
+    def test_contract_probe_fails_when_temporary_workspace_cleanup_fails(self):
+        original_herdr = herdr_smoke.herdr
+
+        def fake_herdr(args, session=None, check=True, echo=True):
+            if args[:2] == ["workspace", "create"]:
+                payload = {"result": {"workspace": {"workspace_id": "w-test"}}}
+            elif args[:2] == ["pane", "list"]:
+                payload = {"result": {"panes": [{"pane_id": "w-test:p1"}]}}
+            elif args[:2] == ["pane", "get"]:
+                payload = {
+                    "result": {
+                        "pane": {
+                            "pane_id": "w-test:p1",
+                            "tokens": {"ime": "contract-probe"},
+                        }
+                    }
+                }
+            else:
+                payload = {"result": {"type": "ok"}}
+            if args[:2] == ["workspace", "close"]:
+                return herdr_smoke.Command(list(args), json.dumps(payload), "close failed", 1)
+            return herdr_smoke.Command(list(args), json.dumps(payload), "", 0)
+
+        try:
+            herdr_smoke.herdr = fake_herdr
+
+            with self.assertRaises(herdr_smoke.SmokeFailure) as caught:
+                herdr_smoke.pane_metadata_contract_smoke(None)
+        finally:
+            herdr_smoke.herdr = original_herdr
+
+        self.assertIn("workspace cleanup failed", str(caught.exception))
+
 
 class StateBackupTests(unittest.TestCase):
     def test_backup_restore_tracks_only_current_session_state_files(self):
@@ -358,6 +391,11 @@ class ManifestCoverageTests(unittest.TestCase):
         manifest_actions = {action["id"] for action in manifest.get("actions", [])}
 
         self.assertEqual(herdr_smoke.REQUIRED_ACTIONS, manifest_actions)
+
+    def test_minimum_herdr_version_includes_pane_metadata_tokens(self):
+        manifest = tomllib.loads((ROOT / "herdr-plugin.toml").read_text(encoding="utf-8"))
+
+        self.assertEqual(manifest["min_herdr_version"], "0.7.4")
 
 
 if __name__ == "__main__":

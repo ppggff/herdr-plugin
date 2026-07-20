@@ -22,7 +22,7 @@ For design and development details, see [DEVELOPMENT.md](DEVELOPMENT.md).
 
 Required:
 
-- Herdr 0.7.0 or newer
+- Herdr 0.7.4 or newer
 - macOS
 - Python 3.9 or newer
 

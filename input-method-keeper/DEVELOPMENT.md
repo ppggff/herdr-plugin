@@ -900,7 +900,7 @@ own remembered input source.
 id = "ppggff.input-method-keeper"
 name = "Input Method Keeper"
 version = "0.1.0"
-min_herdr_version = "0.7.0"
+min_herdr_version = "0.7.4"
 description = "Keep macOS input sources stable per Herdr pane."
 platforms = ["macos"]
 
