@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
 
@@ -51,7 +52,7 @@ def coerce_bool(value: Any, default: bool) -> bool:
 
 
 
-def default_config() -> Dict[str, Any]:
+def base_config() -> Dict[str, Any]:
     return json.loads(json.dumps(DEFAULT_CONFIG))
 
 
@@ -59,8 +60,27 @@ def plugin_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def native_helper_available() -> bool:
+    root = plugin_root()
+    helper = root / "bin" / "herdr-ime-helper-native"
+    source = root / "helpers" / "herdr-ime-helper.swift"
+    if not helper.is_file() or not os.access(helper, os.X_OK):
+        return False
+    try:
+        return not source.exists() or helper.stat().st_mtime >= source.stat().st_mtime
+    except OSError:
+        return False
+
+
+def default_config() -> Dict[str, Any]:
+    config = base_config()
+    if native_helper_available():
+        config["backend"] = helper_backend_config()
+    return config
+
+
 def macism_backend_config() -> Dict[str, Any]:
-    return json.loads(json.dumps(DEFAULT_CONFIG["backend"]))
+    return base_config()["backend"]
 
 
 def helper_backend_config() -> Dict[str, Any]:
@@ -103,7 +123,7 @@ def load_config(config_dir: Path, readonly: bool = True) -> Dict[str, Any]:
 
 
 def merge_config(value: Mapping[str, Any]) -> Dict[str, Any]:
-    config = default_config()
+    config = base_config()
     for key, item in value.items():
         if key == "backend" and isinstance(item, dict):
             backend = dict(config["backend"])

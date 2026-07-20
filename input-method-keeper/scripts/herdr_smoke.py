@@ -128,6 +128,7 @@ def assert_local_files(plugin_path: Path) -> None:
         plugin_path / "herdr-plugin.toml",
         plugin_path / "bin" / "ime-keeper",
         plugin_path / "bin" / "herdr-ime-helper",
+        plugin_path / "bin" / "prepare-install",
         plugin_path / "helpers" / "herdr-ime-helper.swift",
         plugin_path / "src" / "ime_keeper.py",
     ]
@@ -138,6 +139,8 @@ def assert_local_files(plugin_path: Path) -> None:
         raise SmokeFailure("bin/ime-keeper must be executable")
     if not os.access(plugin_path / "bin" / "herdr-ime-helper", os.X_OK):
         raise SmokeFailure("bin/herdr-ime-helper must be executable")
+    if not os.access(plugin_path / "bin" / "prepare-install", os.X_OK):
+        raise SmokeFailure("bin/prepare-install must be executable")
 
 
 def plugin_list(plugin_id: str, session: Optional[str]) -> list[dict[str, Any]]:

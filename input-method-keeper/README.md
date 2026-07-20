@@ -36,11 +36,14 @@ Choose one input-source backend:
 
 | Backend | Recommended for | Dependencies | Notes |
 | --- | --- | --- | --- |
-| Bundled Swift helper | Most users who can install Apple's command line tools | `swiftc`, usually from Xcode Command Line Tools | Recommended. It is included in this plugin, auto-compiles on first use, and supports input-context refresh. |
+| Bundled Swift helper | Most users who can install Apple's command line tools | `swiftc`, usually from Xcode Command Line Tools | Recommended. GitHub installs compile and verify it before registration; local links can compile it on first use. It supports input-context refresh. |
 | `macism` | Users who prefer an existing Homebrew tool or cannot compile Swift locally | Homebrew `macism` | Simpler runtime path, but it may leave some app input contexts stale when switching from CJK input methods to ABC. |
 
-Fresh configs start with `macism` for compatibility. The recommended setup below
-switches to the bundled Swift helper when `swiftc` is available.
+A GitHub install checks Python and both backend paths before Herdr registers the
+plugin. It compiles and verifies the helper when `swiftc` is available. If that
+fails but `macism` exists, installation succeeds with `macism`; if neither
+backend is usable, installation stops with an actionable error. Existing plugin
+configs are never changed by this selection.
 
 To install Apple's command line tools for the Swift helper:
 
@@ -64,6 +67,10 @@ shorthand:
 herdr plugin install ppggff/herdr-plugin/input-method-keeper
 ```
 
+The install preview includes `bin/prepare-install`. Herdr runs it before
+registration, so a successful fresh install has a usable Python runtime and
+input-source backend.
+
 ## Local Development Install
 
 Link and enable a local checkout:
@@ -72,6 +79,10 @@ Link and enable a local checkout:
 herdr plugin link /path/to/herdr-plugin/input-method-keeper
 herdr plugin enable ppggff.input-method-keeper
 ```
+
+`plugin link` does not run manifest build commands. Use the backend actions
+below; choosing the helper keeps the original first-use compilation path for
+local development.
 
 Run a basic smoke check:
 
@@ -82,8 +93,9 @@ input-method-keeper/scripts/herdr_smoke.py --link
 ## Quick Start
 
 1. Install the plugin.
-2. Choose a backend. The bundled Swift helper is recommended when `swiftc` is
-   available:
+2. A GitHub install chooses the verified helper automatically, or `macism` when
+   helper compilation is unavailable. For a local link, choose the bundled
+   helper when `swiftc` is available:
 
    ```sh
    herdr plugin action invoke ppggff.input-method-keeper.set-backend-helper
@@ -111,7 +123,8 @@ herdr plugin action invoke ppggff.input-method-keeper.set-default-action-keep
 herdr plugin action invoke ppggff.input-method-keeper.debug-on
 ```
 
-The helper compiles the first time it is used. If `swiftc` is not installed,
+For GitHub installs, the helper is already compiled and verified. For local
+links, it compiles the first time it is used. If `swiftc` is not installed,
 switch to `macism` or install Xcode Command Line Tools.
 
 Optional live dashboard:
@@ -312,10 +325,16 @@ Recommended when `swiftc` is available:
 herdr plugin action invoke ppggff.input-method-keeper.set-backend-helper
 ```
 
-The helper uses macOS TIS APIs directly. It is not compiled during
-`herdr plugin install`; `bin/herdr-ime-helper` compiles
-`helpers/herdr-ime-helper.swift` automatically the first time the helper runs.
-When Herdr launches it, the compiled binary is cached under:
+The helper uses macOS TIS APIs directly. During a GitHub install,
+`bin/prepare-install` compiles it for the current Mac, executes `current` to
+verify it, and writes `bin/herdr-ime-helper-native` in the managed plugin
+checkout. A fresh config detects that verified binary and selects the helper
+backend automatically.
+
+`plugin link` does not run manifest build commands. In that case,
+`bin/herdr-ime-helper` compiles `helpers/herdr-ime-helper.swift` automatically
+the first time the helper runs. When Herdr launches it, the compiled binary is
+cached under:
 
 ```text
 HERDR_PLUGIN_STATE_DIR/helper-build/herdr-ime-helper
@@ -361,7 +380,8 @@ Use `macism` when you prefer the Homebrew tool or do not have `swiftc`:
 herdr plugin action invoke ppggff.input-method-keeper.set-backend-macism
 ```
 
-A fresh config currently starts with this backend for compatibility:
+When an install cannot build the helper but finds `macism`, a fresh config uses
+this backend:
 
 ```text
 current command: macism

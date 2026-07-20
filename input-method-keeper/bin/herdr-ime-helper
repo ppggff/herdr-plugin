@@ -1,11 +1,16 @@
 #!/bin/sh
 set -eu
 
-ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+ROOT_DIR=${HERDR_IME_KEEPER_PLUGIN_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
 SRC="$ROOT_DIR/helpers/herdr-ime-helper.swift"
+NATIVE_HELPER="$ROOT_DIR/bin/herdr-ime-helper-native"
 
 if [ -n "${HERDR_IME_HELPER_BIN:-}" ]; then
   exec "$HERDR_IME_HELPER_BIN" "$@"
+fi
+
+if [ -x "$NATIVE_HELPER" ] && [ ! "$SRC" -nt "$NATIVE_HELPER" ]; then
+  exec "$NATIVE_HELPER" "$@"
 fi
 
 SWIFTC="${HERDR_IME_HELPER_SWIFTC:-}"

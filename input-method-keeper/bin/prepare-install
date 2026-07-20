@@ -1,0 +1,115 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR=${HERDR_IME_KEEPER_PLUGIN_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
+SOURCE="$ROOT_DIR/helpers/herdr-ime-helper.swift"
+NATIVE_HELPER="$ROOT_DIR/bin/herdr-ime-helper-native"
+
+resolve_command() {
+  candidate=$1
+  if [ -z "$candidate" ]; then
+    return 1
+  fi
+  case "$candidate" in
+    */*)
+      [ -x "$candidate" ] || return 1
+      printf '%s\n' "$candidate"
+      ;;
+    *) command -v "$candidate" 2>/dev/null ;;
+  esac
+}
+
+find_python() {
+  if [ -n "${HERDR_IME_KEEPER_PYTHON:-}" ]; then
+    resolved=$(resolve_command "$HERDR_IME_KEEPER_PYTHON" || true)
+    if [ -n "$resolved" ] && "$resolved" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+    return 1
+  fi
+  for candidate in /opt/homebrew/bin/python3 /usr/local/bin/python3 python3; do
+    resolved=$(resolve_command "$candidate" || true)
+    if [ -n "$resolved" ] && "$resolved" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  done
+  return 1
+}
+
+find_macism() {
+  if [ -n "${HERDR_IME_KEEPER_MACISM:-}" ]; then
+    resolve_command "$HERDR_IME_KEEPER_MACISM"
+    return
+  fi
+  for candidate in /opt/homebrew/bin/macism /usr/local/bin/macism macism; do
+    resolved=$(resolve_command "$candidate" || true)
+    if [ -n "$resolved" ]; then
+      printf '%s\n' "$resolved"
+      return 0
+    fi
+  done
+  return 1
+}
+
+verify_helper() {
+  helper=$1
+  current=$("$helper" current 2>/dev/null || true)
+  [ -n "$current" ]
+}
+
+PYTHON=$(find_python || true)
+if [ -z "$PYTHON" ]; then
+  printf '%s\n' "input-method-keeper install: Python 3.9+ is required" >&2
+  printf '%s\n' "Install it with: brew install python" >&2
+  exit 1
+fi
+printf '%s\n' "input-method-keeper install: Python ready: $PYTHON"
+
+if [ -x "$NATIVE_HELPER" ] && [ ! "$SOURCE" -nt "$NATIVE_HELPER" ] && verify_helper "$NATIVE_HELPER"; then
+  printf '%s\n' "input-method-keeper install: native helper ready: $NATIVE_HELPER"
+  exit 0
+fi
+
+SWIFTC=$(resolve_command "${HERDR_IME_HELPER_SWIFTC:-swiftc}" || true)
+if [ -n "$SWIFTC" ]; then
+  if [ ! -f "$SOURCE" ]; then
+    printf '%s\n' "input-method-keeper install: helper source missing: $SOURCE" >&2
+    exit 1
+  fi
+  MODULE_CACHE=$(mktemp -d "${TMPDIR:-/tmp}/ime-keeper-module-cache.XXXXXX")
+  TMP_HELPER="$NATIVE_HELPER.tmp.$$"
+  cleanup() {
+    rm -f "$TMP_HELPER"
+    rm -rf "$MODULE_CACHE"
+  }
+  trap cleanup EXIT HUP INT TERM
+  if CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" "$SWIFTC" "$SOURCE" -o "$TMP_HELPER"; then
+    chmod +x "$TMP_HELPER"
+    if verify_helper "$TMP_HELPER"; then
+      mv "$TMP_HELPER" "$NATIVE_HELPER"
+      cleanup
+      trap - EXIT HUP INT TERM
+      printf '%s\n' "input-method-keeper install: native helper ready: $NATIVE_HELPER"
+      exit 0
+    fi
+    printf '%s\n' "input-method-keeper install: compiled helper failed verification; checking macism fallback" >&2
+  else
+    printf '%s\n' "input-method-keeper install: helper compilation failed; checking macism fallback" >&2
+  fi
+  cleanup
+  trap - EXIT HUP INT TERM
+else
+  printf '%s\n' "input-method-keeper install: swiftc not found; checking macism fallback" >&2
+fi
+
+MACISM=$(find_macism || true)
+if [ -n "$MACISM" ]; then
+  printf '%s\n' "input-method-keeper install: using macism fallback: $MACISM"
+  exit 0
+fi
+
+printf '%s\n' "input-method-keeper install: no usable input-source backend found" >&2
+printf '%s\n' "Install Xcode Command Line Tools (xcode-select --install) or macism (brew install macism), then retry." >&2
+exit 1

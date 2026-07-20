@@ -24,6 +24,7 @@ The current manifest already declares the fields Herdr requires:
 - `version = "0.1.0"`
 - `min_herdr_version = "0.7.4"`
 - `platforms = ["macos"]`
+- a macOS build preflight that verifies Python and prepares a usable backend
 - actions, pane entrypoint, and event hooks as argv command arrays
 
 The public plugin id is `ppggff.input-method-keeper`. Renaming it later changes

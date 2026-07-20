@@ -170,11 +170,11 @@ This avoids unnecessary macOS input-source churn when the current source already
 matches the target. The explicit `doctor --select-self-test` command is the only
 exception because it exists to test the backend select path.
 
-Default macOS backend:
+Fresh-install backend selection:
 
 ```text
-current command: macism
-select command:  macism {id}
+verified bin/herdr-ime-helper-native -> helper backend
+otherwise                         -> macism backend
 ```
 
 Version 1 allows overriding the backend command in config so users can switch to
@@ -189,15 +189,22 @@ bin/herdr-ime-helper select <input_source_id> [--refresh] [--wait-ms N]
 bin/herdr-ime-helper refresh [--wait-ms N]
 ```
 
-`bin/herdr-ime-helper` is a POSIX wrapper around
-`helpers/herdr-ime-helper.swift`. It compiles the Swift source with `swiftc` on
-first run, caching the binary under `HERDR_PLUGIN_STATE_DIR/helper-build` when
-Herdr provides a state directory, or under `TMPDIR` for manual runs. The wrapper
-uses a small directory lock around compilation so concurrent first runs do not
-write the same cached binary at the same time. The lock records a pid and
-creation timestamp so a dead compiler process or old pidless lock can be
-recovered without stealing an active compiler lock. The Swift code uses TIS
-APIs for `current`, `list`, and `select`.
+GitHub installs run `bin/prepare-install` as a manifest build command. It first
+requires Python 3.9+, then compiles the Swift source for the current host and
+executes `current` to verify the result. A verified binary is stored as
+`bin/herdr-ime-helper-native`; a new config chooses the helper when that file is
+executable and no older than its source. If compilation fails but `macism` is
+available, the build succeeds and a new config keeps the macism backend. If
+neither backend exists, installation fails before registration. Existing config
+files continue to use their explicitly stored backend.
+
+`bin/herdr-ime-helper` is the runtime POSIX wrapper around
+`helpers/herdr-ime-helper.swift`. It prefers the verified install binary. Local
+`plugin link` does not run build commands, so the wrapper retains its first-run
+`swiftc` path, caching under `HERDR_PLUGIN_STATE_DIR/helper-build` when Herdr
+provides a state directory, or under `TMPDIR` for manual runs. A directory lock
+prevents concurrent compiles and recovers dead or stale lock owners. The Swift
+code uses TIS APIs for `current`, `list`, and `select`.
 `--refresh` only creates a tiny temporary AppKit window and waits; it
 intentionally contains no CJKV or policy logic. The Python plugin remains the
 policy owner and may later decide when to add `--refresh` to select calls. The
@@ -902,6 +909,10 @@ name = "Input Method Keeper"
 version = "0.1.0"
 min_herdr_version = "0.7.4"
 description = "Keep macOS input sources stable per Herdr pane."
+platforms = ["macos"]
+
+[[build]]
+command = ["bin/prepare-install"]
 platforms = ["macos"]
 
 [[panes]]

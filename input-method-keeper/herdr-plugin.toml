@@ -5,6 +5,10 @@ min_herdr_version = "0.7.4"
 description = "Keep macOS input sources stable per Herdr pane."
 platforms = ["macos"]
 
+[[build]]
+command = ["bin/prepare-install"]
+platforms = ["macos"]
+
 [[panes]]
 id = "dashboard"
 title = "Input method keeper dashboard"

@@ -332,6 +332,191 @@ class ConfigWriteTests(unittest.TestCase):
 
 
 class HelperWrapperTests(unittest.TestCase):
+    def test_helper_wrapper_prefers_verified_install_native_binary(self):
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            plugin_root = temp_path / "plugin"
+            (plugin_root / "bin").mkdir(parents=True)
+            (plugin_root / "helpers").mkdir()
+            source = plugin_root / "helpers" / "herdr-ime-helper.swift"
+            source.write_text("// helper source\n", encoding="utf-8")
+            native_helper = plugin_root / "bin" / "herdr-ime-helper-native"
+            native_helper.write_text(
+                "#!/bin/sh\nprintf '%s\\n' 'native.current'\n",
+                encoding="utf-8",
+            )
+            native_helper.chmod(0o755)
+            env = os.environ.copy()
+            env["HERDR_IME_KEEPER_PLUGIN_ROOT"] = str(plugin_root)
+            env["HERDR_IME_HELPER_SWIFTC"] = str(temp_path / "missing-swiftc")
+
+            result = subprocess.run(
+                [str(ROOT / "bin" / "herdr-ime-helper"), "current"],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "native.current\n")
+
+    def test_prepare_install_builds_and_verifies_native_helper(self):
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            plugin_root = temp_path / "plugin root with spaces"
+            (plugin_root / "bin").mkdir(parents=True)
+            (plugin_root / "helpers").mkdir()
+            (plugin_root / "helpers" / "herdr-ime-helper.swift").write_text(
+                "// fake helper source\n", encoding="utf-8"
+            )
+            fake_python = temp_path / "python3"
+            fake_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_python.chmod(0o755)
+            fake_swiftc = temp_path / "swiftc"
+            fake_swiftc.write_text(
+                """#!/bin/sh
+set -eu
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-o" ]; then
+    shift
+    out="$1"
+  fi
+  shift || true
+done
+cat > "$out" <<'BIN'
+#!/bin/sh
+case "${1:-}" in
+  current) printf '%s\n' 'fake.current' ;;
+  *) exit 2 ;;
+esac
+BIN
+chmod +x "$out"
+""",
+                encoding="utf-8",
+            )
+            fake_swiftc.chmod(0o755)
+            env = os.environ.copy()
+            env["HERDR_IME_KEEPER_PLUGIN_ROOT"] = str(plugin_root)
+            env["HERDR_IME_KEEPER_PYTHON"] = str(fake_python)
+            env["HERDR_IME_HELPER_SWIFTC"] = str(fake_swiftc)
+
+            result = subprocess.run(
+                [str(ROOT / "bin" / "prepare-install")],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            native_helper = plugin_root / "bin" / "herdr-ime-helper-native"
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(os.access(native_helper, os.X_OK))
+            verified = subprocess.run(
+                [str(native_helper), "current"],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            self.assertEqual(verified.stdout, "fake.current\n")
+            self.assertIn("native helper ready", result.stdout)
+
+    def test_prepare_install_falls_back_to_macism_when_helper_build_fails(self):
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            plugin_root = temp_path / "plugin"
+            (plugin_root / "bin").mkdir(parents=True)
+            (plugin_root / "helpers").mkdir()
+            (plugin_root / "helpers" / "herdr-ime-helper.swift").write_text(
+                "// fake helper source\n", encoding="utf-8"
+            )
+            fake_python = temp_path / "python3"
+            fake_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_python.chmod(0o755)
+            failing_swiftc = temp_path / "swiftc"
+            failing_swiftc.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            failing_swiftc.chmod(0o755)
+            fake_macism = temp_path / "macism"
+            fake_macism.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_macism.chmod(0o755)
+            env = os.environ.copy()
+            env["HERDR_IME_KEEPER_PLUGIN_ROOT"] = str(plugin_root)
+            env["HERDR_IME_KEEPER_PYTHON"] = str(fake_python)
+            env["HERDR_IME_HELPER_SWIFTC"] = str(failing_swiftc)
+            env["HERDR_IME_KEEPER_MACISM"] = str(fake_macism)
+
+            result = subprocess.run(
+                [str(ROOT / "bin" / "prepare-install")],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse((plugin_root / "bin" / "herdr-ime-helper-native").exists())
+            self.assertIn("using macism fallback", result.stdout)
+            self.assertIn("helper compilation failed", result.stderr)
+
+    def test_prepare_install_fails_when_no_input_source_backend_is_usable(self):
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            plugin_root = temp_path / "plugin"
+            (plugin_root / "bin").mkdir(parents=True)
+            (plugin_root / "helpers").mkdir()
+            (plugin_root / "helpers" / "herdr-ime-helper.swift").write_text(
+                "// fake helper source\n", encoding="utf-8"
+            )
+            fake_python = temp_path / "python3"
+            fake_python.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            fake_python.chmod(0o755)
+            failing_swiftc = temp_path / "swiftc"
+            failing_swiftc.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+            failing_swiftc.chmod(0o755)
+            env = os.environ.copy()
+            env["HERDR_IME_KEEPER_PLUGIN_ROOT"] = str(plugin_root)
+            env["HERDR_IME_KEEPER_PYTHON"] = str(fake_python)
+            env["HERDR_IME_HELPER_SWIFTC"] = str(failing_swiftc)
+            env["HERDR_IME_KEEPER_MACISM"] = str(temp_path / "missing-macism")
+
+            result = subprocess.run(
+                [str(ROOT / "bin" / "prepare-install")],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("no usable input-source backend found", result.stderr)
+            self.assertIn("xcode-select --install", result.stderr)
+
+    def test_prepare_install_fails_when_python_is_not_usable(self):
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            plugin_root = temp_path / "plugin"
+            (plugin_root / "bin").mkdir(parents=True)
+            (plugin_root / "helpers").mkdir()
+            (plugin_root / "helpers" / "herdr-ime-helper.swift").write_text(
+                "// fake helper source\n", encoding="utf-8"
+            )
+            env = os.environ.copy()
+            env["HERDR_IME_KEEPER_PLUGIN_ROOT"] = str(plugin_root)
+            env["HERDR_IME_KEEPER_PYTHON"] = str(temp_path / "missing-python")
+
+            result = subprocess.run(
+                [str(ROOT / "bin" / "prepare-install")],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Python 3.9+ is required", result.stderr)
+            self.assertIn("brew install python", result.stderr)
+
     def test_helper_recovers_stale_pidless_compile_lock(self):
         with TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -386,6 +571,14 @@ chmod +x "$out"
 
 
 class ManifestCoverageTests(unittest.TestCase):
+    def test_install_runs_macos_dependency_preflight(self):
+        manifest = tomllib.loads((ROOT / "herdr-plugin.toml").read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            manifest["build"],
+            [{"command": ["bin/prepare-install"], "platforms": ["macos"]}],
+        )
+
     def test_required_actions_match_manifest_actions(self):
         manifest = tomllib.loads((ROOT / "herdr-plugin.toml").read_text(encoding="utf-8"))
         manifest_actions = {action["id"] for action in manifest.get("actions", [])}

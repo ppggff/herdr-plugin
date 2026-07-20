@@ -331,6 +331,27 @@ class BackendTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    def test_fresh_config_prefers_verified_native_helper(self):
+        with mock.patch("ime_keeper.config.native_helper_available", return_value=True):
+            config = ime_keeper.default_config()
+
+        self.assertEqual(config["backend"]["name"], "herdr-ime-helper")
+        self.assertEqual(config["backend"]["current_args"], ["current"])
+
+    def test_existing_macism_config_is_not_migrated_when_native_helper_exists(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_dir = Path(temp_dir)
+            (config_dir / "config.json").write_text(
+                json.dumps({"backend": {"name": "macism"}}),
+                encoding="utf-8",
+            )
+            with mock.patch("ime_keeper.config.native_helper_available", return_value=True):
+                config = ime_keeper.load_config(config_dir, readonly=True)
+
+        self.assertEqual(config["backend"]["name"], "macism")
+        self.assertEqual(config["backend"]["current_args"], [])
+        self.assertEqual(config["backend"]["select_args"], ["{id}"])
+
     def test_merge_config_parses_common_string_booleans(self):
         config = ime_keeper.merge_config(
             {

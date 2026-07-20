@@ -16,3 +16,4 @@ debug.current
 debug.*.log
 focus.log
 helper-build/
+/input-method-keeper/bin/herdr-ime-helper-native
