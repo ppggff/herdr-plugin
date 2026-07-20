@@ -352,6 +352,38 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config["backend"]["current_args"], [])
         self.assertEqual(config["backend"]["select_args"], ["{id}"])
 
+    def test_existing_helper_config_rebinds_wrapper_to_current_plugin(self):
+        config = ime_keeper.merge_config(
+            {
+                "backend": {
+                    "name": "herdr-ime-helper",
+                    "executable_candidates": ["/old/plugin/bin/herdr-ime-helper"],
+                    "current_args": ["current"],
+                    "select_args": ["select", "{id}", "--refresh", "--wait-ms", "150"],
+                }
+            }
+        )
+
+        self.assertEqual(
+            config["backend"]["executable_candidates"],
+            [str(ROOT / "bin" / "herdr-ime-helper")],
+        )
+
+    def test_custom_helper_backend_path_is_not_rebound(self):
+        custom_path = "/opt/custom/input-source-adapter"
+        config = ime_keeper.merge_config(
+            {
+                "backend": {
+                    "name": "herdr-ime-helper",
+                    "executable_candidates": [custom_path],
+                    "current_args": ["current"],
+                    "select_args": ["select", "{id}", "--refresh", "--wait-ms", "150"],
+                }
+            }
+        )
+
+        self.assertEqual(config["backend"]["executable_candidates"], [custom_path])
+
     def test_merge_config_parses_common_string_booleans(self):
         config = ime_keeper.merge_config(
             {

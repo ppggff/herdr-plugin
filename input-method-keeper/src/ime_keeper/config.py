@@ -92,6 +92,28 @@ def helper_backend_config() -> Dict[str, Any]:
     }
 
 
+def rebind_plugin_helper_backend(config: Dict[str, Any]) -> None:
+    """Point a canonical helper backend at the plugin checkout currently running it."""
+    backend = config.get("backend")
+    if not isinstance(backend, dict):
+        return
+    expected = helper_backend_config()
+    candidates = backend.get("executable_candidates")
+    if (
+        backend.get("name") != expected["name"]
+        or backend.get("current_args") != expected["current_args"]
+        or backend.get("select_args") != expected["select_args"]
+        or not isinstance(candidates, list)
+        or len(candidates) != 1
+        or not isinstance(candidates[0], str)
+    ):
+        return
+    candidate = Path(candidates[0])
+    if candidate.name != "herdr-ime-helper" or candidate.parent.name != "bin":
+        return
+    backend["executable_candidates"] = expected["executable_candidates"]
+
+
 
 def config_path(config_dir: Path) -> Path:
     return config_dir / "config.json"
@@ -147,6 +169,7 @@ def merge_config(value: Mapping[str, Any]) -> Dict[str, Any]:
         config["status_ttl_ms"] = max(1000, int(config.get("status_ttl_ms", 600000)))
     except (TypeError, ValueError):
         config["status_ttl_ms"] = 600000
+    rebind_plugin_helper_backend(config)
     return config
 
 
