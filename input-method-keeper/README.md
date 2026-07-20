@@ -340,8 +340,12 @@ cached under:
 HERDR_PLUGIN_STATE_DIR/helper-build/herdr-ime-helper
 ```
 
-For direct manual runs outside Herdr, it caches under `TMPDIR`. It recompiles
-when the Swift source is newer than the cached binary.
+The Swift/Clang module cache is only needed while compiling. The wrapper creates
+a per-compile temporary module cache and removes it immediately afterward; it
+also removes the persistent `helper-build/module-cache` left by older plugin
+versions. Only the small helper executable remains. For direct manual runs
+outside Herdr, the executable is cached under `TMPDIR`. It recompiles when the
+Swift source is newer than the cached binary.
 
 Manual helper commands:
 

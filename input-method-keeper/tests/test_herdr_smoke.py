@@ -524,6 +524,8 @@ chmod +x "$out"
             fake_swiftc.write_text(
                 """#!/bin/sh
 set -eu
+printf '%s\n' "$CLANG_MODULE_CACHE_PATH" > "$FAKE_MODULE_CACHE_LOG"
+printf '%s\n' 'temporary compiler data' > "$CLANG_MODULE_CACHE_PATH/fake.cache"
 out=""
 while [ "$#" -gt 0 ]; do
   if [ "$1" = "-o" ]; then
@@ -552,10 +554,15 @@ chmod +x "$out"
             lock_dir = state_dir / "helper-build" / ".compile.lock"
             lock_dir.mkdir(parents=True)
             os.utime(lock_dir, (946684800, 946684800))
+            legacy_module_cache = state_dir / "helper-build" / "module-cache"
+            legacy_module_cache.mkdir()
+            (legacy_module_cache / "legacy.cache").write_text("legacy\n", encoding="utf-8")
+            module_cache_log = temp_path / "module-cache.log"
 
             env = os.environ.copy()
             env["HERDR_PLUGIN_STATE_DIR"] = str(state_dir)
             env["HERDR_IME_HELPER_SWIFTC"] = str(fake_swiftc)
+            env["FAKE_MODULE_CACHE_LOG"] = str(module_cache_log)
             result = subprocess.run(
                 [str(ROOT / "bin" / "herdr-ime-helper"), "current"],
                 env=env,
@@ -568,6 +575,83 @@ chmod +x "$out"
             self.assertEqual(result.stdout, "fake.current\n")
             self.assertFalse(lock_dir.exists())
             self.assertTrue((state_dir / "helper-build" / "herdr-ime-helper").is_file())
+            self.assertFalse(legacy_module_cache.exists())
+            temporary_module_cache = Path(module_cache_log.read_text(encoding="utf-8").strip())
+            self.assertFalse(temporary_module_cache.exists())
+
+    def test_native_helper_removes_legacy_state_module_cache_without_swiftc(self):
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            plugin_root = temp_path / "plugin"
+            (plugin_root / "bin").mkdir(parents=True)
+            (plugin_root / "helpers").mkdir()
+            source = plugin_root / "helpers" / "herdr-ime-helper.swift"
+            source.write_text("// helper source\n", encoding="utf-8")
+            os.utime(source, (1, 1))
+            native_helper = plugin_root / "bin" / "herdr-ime-helper-native"
+            native_helper.write_text(
+                "#!/bin/sh\nprintf '%s\\n' 'native.current'\n",
+                encoding="utf-8",
+            )
+            native_helper.chmod(0o755)
+            state_dir = temp_path / "state"
+            legacy_module_cache = state_dir / "helper-build" / "module-cache"
+            legacy_module_cache.mkdir(parents=True)
+            (legacy_module_cache / "large.cache").write_text("legacy\n", encoding="utf-8")
+            env = os.environ.copy()
+            env["HERDR_IME_KEEPER_PLUGIN_ROOT"] = str(plugin_root)
+            env["HERDR_PLUGIN_STATE_DIR"] = str(state_dir)
+            env["HERDR_IME_HELPER_SWIFTC"] = str(temp_path / "missing-swiftc")
+
+            result = subprocess.run(
+                [str(ROOT / "bin" / "herdr-ime-helper"), "current"],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "native.current\n")
+            self.assertFalse(legacy_module_cache.exists())
+
+    def test_cached_helper_removes_legacy_module_cache_without_recompile(self):
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            plugin_root = temp_path / "plugin"
+            (plugin_root / "bin").mkdir(parents=True)
+            (plugin_root / "helpers").mkdir()
+            source = plugin_root / "helpers" / "herdr-ime-helper.swift"
+            source.write_text("// helper source\n", encoding="utf-8")
+            os.utime(source, (1, 1))
+            state_dir = temp_path / "state"
+            build_dir = state_dir / "helper-build"
+            build_dir.mkdir(parents=True)
+            cached_helper = build_dir / "herdr-ime-helper"
+            cached_helper.write_text(
+                "#!/bin/sh\nprintf '%s\\n' 'cached.current'\n",
+                encoding="utf-8",
+            )
+            cached_helper.chmod(0o755)
+            legacy_module_cache = build_dir / "module-cache"
+            legacy_module_cache.mkdir()
+            (legacy_module_cache / "large.cache").write_text("legacy\n", encoding="utf-8")
+            env = os.environ.copy()
+            env["HERDR_IME_KEEPER_PLUGIN_ROOT"] = str(plugin_root)
+            env["HERDR_PLUGIN_STATE_DIR"] = str(state_dir)
+            env["HERDR_IME_HELPER_SWIFTC"] = str(temp_path / "missing-swiftc")
+
+            result = subprocess.run(
+                [str(ROOT / "bin" / "herdr-ime-helper"), "current"],
+                env=env,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout, "cached.current\n")
+            self.assertFalse(legacy_module_cache.exists())
 
 
 class ManifestCoverageTests(unittest.TestCase):

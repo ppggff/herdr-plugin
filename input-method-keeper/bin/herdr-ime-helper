@@ -9,30 +9,33 @@ if [ -n "${HERDR_IME_HELPER_BIN:-}" ]; then
   exec "$HERDR_IME_HELPER_BIN" "$@"
 fi
 
-if [ -x "$NATIVE_HELPER" ] && [ ! "$SRC" -nt "$NATIVE_HELPER" ]; then
-  exec "$NATIVE_HELPER" "$@"
-fi
-
-SWIFTC="${HERDR_IME_HELPER_SWIFTC:-}"
-if [ -z "$SWIFTC" ]; then
-  SWIFTC=$(command -v swiftc || true)
-fi
-if [ -z "$SWIFTC" ]; then
-  printf '%s\n' "herdr-ime-helper: swiftc not found" >&2
-  exit 127
-fi
-
 if [ -n "${HERDR_PLUGIN_STATE_DIR:-}" ]; then
   BUILD_DIR="$HERDR_PLUGIN_STATE_DIR/helper-build"
 else
   BUILD_DIR="${TMPDIR:-/tmp}/herdr-ime-helper-${USER:-user}"
 fi
 BIN="$BUILD_DIR/herdr-ime-helper"
+LOCK_DIR="$BUILD_DIR/.compile.lock"
+LEGACY_MODULE_CACHE="$BUILD_DIR/module-cache"
 
 mkdir -p "$BUILD_DIR"
 
-if [ ! -x "$BIN" ] || [ "$SRC" -nt "$BIN" ]; then
-  LOCK_DIR="$BUILD_DIR/.compile.lock"
+native_helper_ready() {
+  [ -x "$NATIVE_HELPER" ] && [ ! "$SRC" -nt "$NATIVE_HELPER" ]
+}
+
+cached_helper_needs_compile() {
+  [ ! -x "$BIN" ] || [ "$SRC" -nt "$BIN" ]
+}
+
+if native_helper_ready && [ ! -d "$LEGACY_MODULE_CACHE" ]; then
+  exec "$NATIVE_HELPER" "$@"
+fi
+if ! native_helper_ready && ! cached_helper_needs_compile && [ ! -d "$LEGACY_MODULE_CACHE" ]; then
+  exec "$BIN" "$@"
+fi
+
+if cached_helper_needs_compile || [ -d "$LEGACY_MODULE_CACHE" ]; then
   LOCK_START=$(date +%s)
   lock_mtime() {
     stat -f %m "$LOCK_DIR" 2>/dev/null || stat -c %Y "$LOCK_DIR" 2>/dev/null || printf '0\n'
@@ -61,17 +64,30 @@ if [ ! -x "$BIN" ] || [ "$SRC" -nt "$BIN" ]; then
   printf '%s\n' "$$" > "$LOCK_DIR/pid"
   printf '%s\n' "$(date +%s)" > "$LOCK_DIR/created_at"
   TMP_BIN=""
+  MODULE_CACHE=""
   cleanup() {
     if [ -n "$TMP_BIN" ]; then
       rm -f "$TMP_BIN"
+    fi
+    if [ -n "$MODULE_CACHE" ]; then
+      rm -rf "$MODULE_CACHE"
     fi
     rm -f "$LOCK_DIR/pid" "$LOCK_DIR/created_at"
     rmdir "$LOCK_DIR" 2>/dev/null || true
   }
   trap cleanup EXIT HUP INT TERM
-  MODULE_CACHE="$BUILD_DIR/module-cache"
-  mkdir -p "$MODULE_CACHE"
-  if [ ! -x "$BIN" ] || [ "$SRC" -nt "$BIN" ]; then
+
+  rm -rf "$LEGACY_MODULE_CACHE"
+  if ! native_helper_ready && cached_helper_needs_compile; then
+    SWIFTC="${HERDR_IME_HELPER_SWIFTC:-}"
+    if [ -z "$SWIFTC" ]; then
+      SWIFTC=$(command -v swiftc || true)
+    fi
+    if [ -z "$SWIFTC" ]; then
+      printf '%s\n' "herdr-ime-helper: swiftc not found" >&2
+      exit 127
+    fi
+    MODULE_CACHE=$(mktemp -d "$BUILD_DIR/.module-cache.XXXXXX")
     TMP_BIN="$BUILD_DIR/.herdr-ime-helper.$$"
     CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" "$SWIFTC" "$SRC" -o "$TMP_BIN"
     mv "$TMP_BIN" "$BIN"
@@ -81,4 +97,7 @@ if [ ! -x "$BIN" ] || [ "$SRC" -nt "$BIN" ]; then
   trap - EXIT HUP INT TERM
 fi
 
+if native_helper_ready; then
+  exec "$NATIVE_HELPER" "$@"
+fi
 exec "$BIN" "$@"

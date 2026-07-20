@@ -203,8 +203,11 @@ files continue to use their explicitly stored backend.
 `plugin link` does not run build commands, so the wrapper retains its first-run
 `swiftc` path, caching under `HERDR_PLUGIN_STATE_DIR/helper-build` when Herdr
 provides a state directory, or under `TMPDIR` for manual runs. A directory lock
-prevents concurrent compiles and recovers dead or stale lock owners. The Swift
-code uses TIS APIs for `current`, `list`, and `select`.
+prevents concurrent compiles and recovers dead or stale lock owners. Each
+compile uses an isolated temporary module cache that is deleted on success or
+failure. While holding the same lock, the wrapper also removes the persistent
+`helper-build/module-cache` created by older versions. The Swift code uses TIS
+APIs for `current`, `list`, and `select`.
 `--refresh` only creates a tiny temporary AppKit window and waits; it
 intentionally contains no CJKV or policy logic. The Python plugin remains the
 policy owner and may later decide when to add `--refresh` to select calls. The
