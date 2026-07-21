@@ -12,7 +12,17 @@ source memory.
 
 ## Get Started
 
+Install the current release:
+
+```sh
+herdr plugin install ppggff/herdr-plugin/input-method-keeper \
+  --ref v0.2.0 --yes
+```
+
 See [input-method-keeper/README.md](input-method-keeper/README.md) for install,
-quick start, configuration, testing, and troubleshooting.
+upgrade, quick start, configuration, testing, and troubleshooting.
+
+See the [v0.2.0 release](https://github.com/ppggff/herdr-plugin/releases/tag/v0.2.0)
+for highlights and validation details.
 
 For the GitHub publishing checklist, see [PUBLISHING.md](PUBLISHING.md).

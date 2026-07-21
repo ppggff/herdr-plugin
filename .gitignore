@@ -7,6 +7,9 @@ __pycache__/
 .coverage
 htmlcov/
 
+# Local research and working notes.
+/docs/
+
 # Local Herdr/plugin runtime artifacts should live in Herdr-managed config and
 # state directories, but ignore these names if they are created during manual
 # development.

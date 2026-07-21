@@ -60,16 +60,38 @@ brew install macism
 
 ## Install From GitHub
 
-After this repository is public, install the plugin with Herdr's GitHub
-shorthand:
+Install the current release with Herdr's GitHub shorthand:
 
 ```sh
-herdr plugin install ppggff/herdr-plugin/input-method-keeper
+herdr plugin install ppggff/herdr-plugin/input-method-keeper \
+  --ref v0.2.0 --yes
 ```
 
 The install preview includes `bin/prepare-install`. Herdr runs it before
 registration, so a successful fresh install has a usable Python runtime and
 input-source backend.
+
+To follow the current `main` branch instead of a tagged release:
+
+```sh
+herdr plugin install ppggff/herdr-plugin/input-method-keeper --yes
+```
+
+## Upgrade
+
+Run the install command again with the release you want. To upgrade to the
+current `main` branch:
+
+```sh
+herdr plugin install ppggff/herdr-plugin/input-method-keeper --yes
+```
+
+Herdr replaces the managed checkout while preserving the plugin's configuration
+and state directories. Verify the upgraded plugin afterward:
+
+```sh
+herdr plugin action invoke status --plugin ppggff.input-method-keeper
+```
 
 ## Local Development Install
 
@@ -98,13 +120,13 @@ input-method-keeper/scripts/herdr_smoke.py --link
    helper when `swiftc` is available:
 
    ```sh
-   herdr plugin action invoke ppggff.input-method-keeper.set-backend-helper
+   herdr plugin action invoke set-backend-helper --plugin ppggff.input-method-keeper
    ```
 
    Or use `macism`:
 
    ```sh
-   herdr plugin action invoke ppggff.input-method-keeper.set-backend-macism
+   herdr plugin action invoke set-backend-macism --plugin ppggff.input-method-keeper
    ```
 
 3. Focus Herdr.
@@ -117,10 +139,10 @@ input-method-keeper/scripts/herdr_smoke.py --link
 You can run those actions from Herdr's action UI, or from a shell:
 
 ```sh
-herdr plugin action invoke ppggff.input-method-keeper.set-backend-helper
-herdr plugin action invoke ppggff.input-method-keeper.set-default-input-source
-herdr plugin action invoke ppggff.input-method-keeper.set-default-action-keep
-herdr plugin action invoke ppggff.input-method-keeper.debug-on
+herdr plugin action invoke set-backend-helper --plugin ppggff.input-method-keeper
+herdr plugin action invoke set-default-input-source --plugin ppggff.input-method-keeper
+herdr plugin action invoke set-default-action-keep --plugin ppggff.input-method-keeper
+herdr plugin action invoke debug-on --plugin ppggff.input-method-keeper
 ```
 
 For GitHub installs, the helper is already compiled and verified. For local
@@ -163,7 +185,7 @@ Herdr exposes these actions:
 Run any action with:
 
 ```sh
-herdr plugin action invoke ppggff.input-method-keeper.<action-id>
+herdr plugin action invoke <action-id> --plugin ppggff.input-method-keeper
 ```
 
 | Action id | Effect |
@@ -322,7 +344,7 @@ select(input_source_id) -> success/failure
 Recommended when `swiftc` is available:
 
 ```sh
-herdr plugin action invoke ppggff.input-method-keeper.set-backend-helper
+herdr plugin action invoke set-backend-helper --plugin ppggff.input-method-keeper
 ```
 
 The helper uses macOS TIS APIs directly. During a GitHub install,
@@ -381,7 +403,7 @@ After `set-backend-helper`, `config.json` contains:
 Use `macism` when you prefer the Homebrew tool or do not have `swiftc`:
 
 ```sh
-herdr plugin action invoke ppggff.input-method-keeper.set-backend-macism
+herdr plugin action invoke set-backend-macism --plugin ppggff.input-method-keeper
 ```
 
 When an install cannot build the helper but finds `macism`, a fresh config uses
