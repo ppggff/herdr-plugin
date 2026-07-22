@@ -16,7 +16,10 @@ Version 1 is intentionally small:
 - one global default action: `keep`, `reset`, or `ignore`
 - no rule engine yet
 
-For design and development details, see [DEVELOPMENT.md](DEVELOPMENT.md).
+For design and development details, see [DEVELOPMENT.md](DEVELOPMENT.md). The
+planned [v0.3 maintenance release](V0.3.md) focuses on quiet defaults, lower
+focus-path overhead, bounded logs, and automatic current-session pane-memory
+maintenance. Those behaviors are not part of v0.2 yet.
 
 ## Requirements
 
@@ -605,5 +608,14 @@ input-method-keeper/scripts/herdr_smoke.py --link --full-ime
   wait. The Swift helper backend with `--refresh` has manually fixed this
   symptom in Herdr; the limitation remains for the default `macism` backend.
 - Version 1 has no rule engine and no ignore list.
-- Stale cross-session state is removed only by `doctor-gc-all` /
+- Current-session pane records normally follow `pane.closed`, `tab.closed`,
+  `pane.moved`, and `workspace.closed`, but a missed lifecycle event can leave a
+  stale record. Version 0.2 does not reconcile those records against the live
+  pane list.
+- Stale non-current session directories are removed only by `doctor-gc-all` /
   `doctor --gc-all`, or by a future Herdr session lifecycle event.
+
+The planned [v0.3 release](V0.3.md) adds guarded, low-frequency reconciliation
+for stale pane records in the current session. Routine cleanup will be
+automatic; doctor remains an inspection and recovery tool rather than a normal
+usage requirement.

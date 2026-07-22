@@ -1215,21 +1215,40 @@ context.
   `default_action = "ignore"` or `enabled = false` to pause the plugin globally,
   or switch `default_action` to `reset` when all panes should use the default
   input source without pane memory.
-- Version 1 does not infer closed Herdr sessions. Stale cross-session state is
-  removed only by `doctor-gc-all` / `doctor --gc-all` using an age threshold, or
-  by a future Herdr session lifecycle event if one becomes available.
+- Version 1 relies on pane/tab/workspace lifecycle events for current-session
+  cleanup. A missed event can leave stale pane records because v0.2 does not
+  reconcile stored records against the live pane list.
+- Version 1 does not infer closed Herdr sessions. Stale non-current session
+  directories are removed only by `doctor-gc-all` / `doctor --gc-all` using an
+  age threshold, or by a future Herdr session lifecycle event if one becomes
+  available.
 - A future long-running monitor could improve this by observing macOS input
   source changes in real time and associating them with the currently focused
   Herdr pane.
 
+## Planned v0.3
+
+The canonical v0.3 plan is [V0.3.md](V0.3.md): **quiet, fast, and
+self-maintaining**.
+
+It defines:
+
+- immediate lifecycle cleanup plus guarded 24-hour automatic reconciliation;
+- read-only live/stored/unmatched health projections for status and dashboard;
+- quiet defaults for new configs without rewriting existing user choices;
+- focus-stage timing and safe duplicate-I/O reduction;
+- socket-first Herdr operations behind the existing adapter interface;
+- bounded focus/debug log rotation and retention;
+- compatibility rules, delivery slices, and release acceptance criteria; and
+- explicit non-goals, including no daemon, rule engine, settings framework, or
+  new public cleanup command.
+
+Keep the detailed behavior and acceptance criteria in `V0.3.md` rather than
+duplicating them here. The current implementation sections above continue to
+describe v0.2 until individual v0.3 slices land.
+
 ## Future Ideas
 
-- Reduce the `pane.focused` `run.lock` critical section. The current
-  implementation keeps state updates serialized and uses short external-command
-  timeouts, but still calls backend current/select and Herdr status publishing
-  while holding `run.lock`. A future refactor should snapshot/load state under
-  the lock, run backend/Herdr I/O outside the lock where possible, then re-enter
-  the lock with a generation or last-seen validation before saving state.
 - A simple TUI settings pane could build on the dashboard once the current
   behavior has been used for a while. Keep it as a settings and explicit-action
   surface, not a replacement for the automatic focus handler.
