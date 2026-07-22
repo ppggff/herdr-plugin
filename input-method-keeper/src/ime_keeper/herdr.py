@@ -33,14 +33,36 @@ class HerdrClient:
         return self._current_pane_cli()
 
     def _current_pane_socket(self, socket_path_value: str) -> Optional[Dict[str, Any]]:
+        response = self._socket_request(
+            "pane.current", {}, timeout=1.0, socket_path=socket_path_value
+        )
+        if not isinstance(response, dict):
+            return None
+        result = response.get("result", {})
+        if isinstance(result, dict):
+            pane = result.get("pane")
+            if isinstance(pane, dict):
+                return pane
+        return None
+
+    def _socket_request(
+        self,
+        method: str,
+        params: Mapping[str, Any],
+        timeout: float,
+        socket_path: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        socket_path_value = socket_path or self.env.get("HERDR_SOCKET_PATH", "")
+        if not socket_path_value or timeout <= 0:
+            return None
         request = {
-            "id": f"ime-keeper-{os.getpid()}-{int(time.time() * 1000)}",
-            "method": "pane.current",
-            "params": {},
+            "id": f"ime-keeper-{os.getpid()}-{time.monotonic_ns()}",
+            "method": method,
+            "params": dict(params),
         }
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-                sock.settimeout(1.0)
+                sock.settimeout(timeout)
                 sock.connect(socket_path_value)
                 sock.sendall((json.dumps(request) + "\n").encode("utf-8"))
                 chunks = []
@@ -55,12 +77,39 @@ class HerdrClient:
             response = json.loads(line.decode("utf-8"))
         except Exception:
             return None
-        result = response.get("result", {})
-        if isinstance(result, dict):
-            pane = result.get("pane")
-            if isinstance(pane, dict):
-                return pane
-        return None
+        return response if isinstance(response, dict) else None
+
+    def list_panes_socket(self, timeout: float) -> Optional[List[Dict[str, Any]]]:
+        response = self._socket_request("pane.list", {}, timeout=timeout)
+        if not isinstance(response, dict) or response.get("error"):
+            return None
+        result = response.get("result")
+        panes = result.get("panes") if isinstance(result, dict) else None
+        if not isinstance(panes, list):
+            return None
+        validated: List[Dict[str, Any]] = []
+        for pane in panes:
+            if (
+                not isinstance(pane, dict)
+                or not isinstance(pane.get("pane_id"), str)
+                or not pane["pane_id"]
+            ):
+                return None
+            validated.append(pane)
+        return validated
+
+    def pane_presence_socket(self, pane_id: str, timeout: float) -> str:
+        response = self._socket_request("pane.get", {"pane_id": pane_id}, timeout=timeout)
+        if not isinstance(response, dict):
+            return "unknown"
+        error = response.get("error")
+        if isinstance(error, dict):
+            return "absent" if error.get("code") == "pane_not_found" else "unknown"
+        result = response.get("result")
+        pane = result.get("pane") if isinstance(result, dict) else None
+        if isinstance(pane, dict) and pane.get("pane_id") == pane_id:
+            return "present"
+        return "unknown"
 
     def _current_pane_cli(self) -> Optional[Dict[str, Any]]:
         herdr_bin = self._herdr_bin()
@@ -154,6 +203,10 @@ class HerdrClient:
         return [item for item in tabs if isinstance(item, dict)]
 
     def list_panes(self, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        if workspace_id is None and self.env.get("HERDR_SOCKET_PATH"):
+            socket_panes = self.list_panes_socket(1.0)
+            if socket_panes is not None:
+                return socket_panes
         args = ["pane", "list"]
         if workspace_id:
             args += ["--workspace", workspace_id]
@@ -165,36 +218,36 @@ class HerdrClient:
         return [item for item in panes if isinstance(item, dict)]
 
     def show_notification(self, title: str, body: str) -> CommandResult:
-        return self._run_herdr(
-            [
-                "notification",
-                "show",
-                title,
-                "--body",
-                body,
-                "--position",
-                "top-right",
-                "--sound",
-                "none",
-            ],
+        return self._socket_command(
+            "notification.show",
+            {"title": title, "body": body, "position": "top-right", "sound": "none"},
             timeout=1.5,
         )
 
     def report_pane_status(self, pane_id: str, status: str, ttl_ms: int) -> CommandResult:
-        return self._run_herdr(
-            [
-                "pane",
-                "report-metadata",
-                pane_id,
-                "--source",
-                "ppggff.input-method-keeper",
-                "--token",
-                f"ime={status}",
-                "--ttl-ms",
-                str(ttl_ms),
-            ],
+        return self._socket_command(
+            "pane.report_metadata",
+            {
+                "pane_id": pane_id,
+                "source": "ppggff.input-method-keeper",
+                "tokens": {"ime": status},
+                "ttl_ms": ttl_ms,
+            },
             timeout=1.5,
         )
+
+    def _socket_command(
+        self, method: str, params: Mapping[str, Any], timeout: float
+    ) -> CommandResult:
+        response = self._socket_request(method, params, timeout=timeout)
+        if not isinstance(response, dict):
+            return CommandResult(False, "", "herdr socket unavailable", None)
+        error = response.get("error")
+        if isinstance(error, dict):
+            return CommandResult(False, "", str(error.get("message") or error), None)
+        if not isinstance(response.get("result"), dict):
+            return CommandResult(False, "", "invalid herdr socket response", None)
+        return CommandResult(True, "", "", 0)
 
     def doctor(self) -> CommandResult:
         return CommandResult(True, "", "")

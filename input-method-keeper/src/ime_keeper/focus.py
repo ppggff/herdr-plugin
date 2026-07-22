@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+import dataclasses
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
 
@@ -10,12 +11,12 @@ from ._files import FileLock, run_lock_path
 from .config import load_config
 from .herdr import pane_parts
 from .input_source import CommandResult, ensure_input_source_details, short_input_source
+from .logs import append_focus_line, log_debug
 from .records import (
     PaneRecords,
     RecordsUnavailable,
     StateStore,
     local_now_for_log,
-    log_debug,
     reconcile_state_policy,
 )
 
@@ -328,10 +329,9 @@ def append_focus_log(
     if not bool(config.get("focus_log", True)):
         return None
     try:
-        store.session_dir.mkdir(parents=True, exist_ok=True)
-        with store.focus_log_path.open("a", encoding="utf-8") as handle:
-            handle.write(
-                focus_log_line(
+        return append_focus_line(
+            store,
+            focus_log_line(
                     store,
                     pane_id,
                     input_source_id,
@@ -344,12 +344,10 @@ def append_focus_log(
                     backend_current_before_select,
                     select_action,
                     reason,
-                )
-                + "\n"
-            )
+                ),
+        )
     except OSError as exc:
         return f"focus_log_failed: {exc}"
-    return None
 
 
 def publish_focus_status(
@@ -366,7 +364,8 @@ def publish_focus_status(
     backend_current_before_select: Optional[str] = None,
     select_action: Optional[str] = None,
     reason: Optional[str] = None,
-) -> None:
+    current_tokens: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, float]:
     status = short_input_source(input_source_id)
     title = focus_status_title(
         previous_pane_id,
@@ -388,6 +387,7 @@ def publish_focus_status(
         reason,
     )
     failures = []
+    publication_ms = {"metadata_ms": 0.0, "notification_ms": 0.0}
     focus_log_error = append_focus_log(
         store,
         config,
@@ -405,20 +405,29 @@ def publish_focus_status(
     )
     if focus_log_error:
         failures.append(focus_log_error)
-    if bool(config.get("pane_status_on_focus", True)) and hasattr(herdr, "report_pane_status"):
+    token_unchanged = isinstance(current_tokens, Mapping) and current_tokens.get("ime") == status
+    if (
+        bool(config.get("pane_status_on_focus", True))
+        and not token_unchanged
+        and hasattr(herdr, "report_pane_status")
+    ):
+        started = time.monotonic()
         try:
             result = herdr.report_pane_status(pane_id, status, int(config.get("status_ttl_ms", 600000)))
             if isinstance(result, CommandResult) and not result.ok:
                 failures.append(f"pane_status_failed: {result.stderr or result.stdout}")
         except Exception as exc:
             failures.append(f"pane_status_failed: {exc}")
+        publication_ms["metadata_ms"] = (time.monotonic() - started) * 1000
     if bool(config.get("notify_on_focus", True)) and hasattr(herdr, "show_notification"):
+        started = time.monotonic()
         try:
             result = herdr.show_notification(title, body)
             if isinstance(result, CommandResult) and not result.ok:
                 failures.append(f"notification_failed: {result.stderr or result.stdout}")
         except Exception as exc:
             failures.append(f"notification_failed: {exc}")
+        publication_ms["notification_ms"] = (time.monotonic() - started) * 1000
     if failures:
         warning = {
             "event": "focus-status",
@@ -430,6 +439,26 @@ def publish_focus_status(
         }
         log_debug(store, config, warning)
         print(json.dumps({"level": "warning", **warning}, ensure_ascii=False), file=sys.stderr)
+    return publication_ms
+
+
+def log_focus_timings(
+    store: StateStore,
+    config: Mapping[str, Any],
+    pane_id: str,
+    timings: Mapping[str, Any],
+    started: float,
+) -> None:
+    log_debug(
+        store,
+        config,
+        {
+            "event": "focus-timings",
+            "pane_id": pane_id,
+            **dict(timings),
+            "total_ms": (time.monotonic() - started) * 1000,
+        },
+    )
 
 
 def stable_current_pane(herdr: Any, debounce_seconds: float) -> Optional[Dict[str, Any]]:
@@ -454,13 +483,25 @@ def handle_pane_focused(
     parsed: Mapping[str, Any],
     debounce_seconds: float,
 ) -> int:
+    focus_started = time.monotonic()
+    timings: Dict[str, Any] = {
+        "lock_wait_ms": 0.0,
+        "stabilize_ms": 0.0,
+        "backend_current_ms": 0.0,
+        "backend_select_ms": 0.0,
+        "metadata_ms": 0.0,
+        "notification_ms": 0.0,
+        "coalesced_events": 0,
+    }
     records = PaneRecords(store)
     with FileLock(store.focus_lock_path, blocking=False) as focus_lock:
         if not focus_lock.acquired:
             payload = {"pane_id": parsed.get("pane_id")} if parsed.get("pane_id") else {}
             store.mark_dirty(payload)
             return 0
+        lock_started = time.monotonic()
         with FileLock(run_lock_path(context.state_dir), blocking=True):
+            timings["lock_wait_ms"] += (time.monotonic() - lock_started) * 1000
             config = load_config(context.config_dir, readonly=True)
             mode = reconcile_state_policy(config, store, "pane-focused")
             if mode in {"disabled", "ignore"}:
@@ -468,13 +509,17 @@ def handle_pane_focused(
                 return 0
         deadline = time.monotonic() + 1.0
         while True:
+            stabilize_started = time.monotonic()
             pane = stable_current_pane(herdr, debounce_seconds)
+            timings["stabilize_ms"] += (time.monotonic() - stabilize_started) * 1000
             if not pane:
                 return 0
             stable_pane_id = pane.get("pane_id")
             if not stable_pane_id:
                 return 0
-            with FileLock(run_lock_path(context.state_dir), blocking=True):
+            lock_started = time.monotonic()
+            with FileLock(run_lock_path(context.state_dir), blocking=True) as decision_lock:
+                timings["lock_wait_ms"] += (time.monotonic() - lock_started) * 1000
                 config = load_config(context.config_dir, readonly=True)
                 mode = reconcile_state_policy(config, store, "pane-focused")
                 if mode in {"disabled", "ignore"}:
@@ -540,7 +585,8 @@ def handle_pane_focused(
                         },
                     )
                     store.clear_dirty()
-                    publish_focus_status(
+                    decision_lock.release()
+                    publication_ms = publish_focus_status(
                         store,
                         config,
                         herdr,
@@ -551,8 +597,14 @@ def handle_pane_focused(
                         backend_current_before_select=ensure_result.get("current"),
                         select_action=ensure_result.get("action"),
                         reason="reset-default",
+                        current_tokens=pane.get("tokens") if isinstance(pane.get("tokens"), Mapping) else None,
                     )
+                    timings.update(publication_ms)
+                    timings["backend_current_ms"] += float(ensure_result.get("current_ms", 0.0))
+                    timings["backend_select_ms"] += float(ensure_result.get("select_ms", 0.0))
+                    log_focus_timings(store, config, str(stable_pane_id), timings, focus_started)
                     if should_loop_again(store, herdr, stable_pane_id, deadline):
+                        timings["coalesced_events"] += 1
                         continue
                     return 0
                 try:
@@ -588,7 +640,8 @@ def handle_pane_focused(
                             "reason": "same-pane",
                         },
                     )
-                    publish_focus_status(
+                    decision_lock.release()
+                    publication_ms = publish_focus_status(
                         store,
                         config,
                         herdr,
@@ -598,7 +651,14 @@ def handle_pane_focused(
                         stored_source,
                         backend_current_before_select=None,
                         reason="same-pane",
+                        current_tokens=pane.get("tokens") if isinstance(pane.get("tokens"), Mapping) else None,
                     )
+                    timings.update(publication_ms)
+                    log_focus_timings(store, config, str(stable_pane_id), timings, focus_started)
+                    if should_loop_again(store, herdr, stable_pane_id, deadline):
+                        timings["coalesced_events"] += 1
+                        continue
+                    attempt_due_reconciliation(context, store, herdr, config)
                     if should_loop_again(store, herdr, stable_pane_id, deadline):
                         continue
                     return 0
@@ -607,7 +667,11 @@ def handle_pane_focused(
                 previous_stored_source = memory.previous_stored_source
                 if previous_pane_id and previous_pane_id != stable_pane_id:
                     try:
+                        backend_current_started = time.monotonic()
                         pending_observation = backend.current()
+                        timings["backend_current_ms"] += (
+                            time.monotonic() - backend_current_started
+                        ) * 1000
                     except Exception as exc:
                         log_debug(
                             store,
@@ -675,7 +739,14 @@ def handle_pane_focused(
                     )
                     continue
                 try:
-                    ensure_result = ensure_input_source_details(backend, str(target))
+                    if pending_observation is not None:
+                        ensure_result = ensure_input_source_details(
+                            backend,
+                            str(target),
+                            known_current=pending_observation,
+                        )
+                    else:
+                        ensure_result = ensure_input_source_details(backend, str(target))
                 except Exception as exc:
                     log_debug(
                         store,
@@ -713,7 +784,8 @@ def handle_pane_focused(
                         "reason": "restored-target",
                     },
                 )
-                publish_focus_status(
+                decision_lock.release()
+                publication_ms = publish_focus_status(
                     store,
                     config,
                     herdr,
@@ -727,7 +799,16 @@ def handle_pane_focused(
                     backend_current_before_select=ensure_result.get("current"),
                     select_action=ensure_result.get("action"),
                     reason="restored-target",
+                    current_tokens=pane.get("tokens") if isinstance(pane.get("tokens"), Mapping) else None,
                 )
+                timings.update(publication_ms)
+                timings["backend_current_ms"] += float(ensure_result.get("current_ms", 0.0))
+                timings["backend_select_ms"] += float(ensure_result.get("select_ms", 0.0))
+                log_focus_timings(store, config, str(stable_pane_id), timings, focus_started)
+                if should_loop_again(store, herdr, stable_pane_id, deadline):
+                    timings["coalesced_events"] += 1
+                    continue
+                attempt_due_reconciliation(context, store, herdr, config)
                 if should_loop_again(store, herdr, stable_pane_id, deadline):
                     continue
                 return 0
@@ -740,3 +821,29 @@ def should_loop_again(store: StateStore, herdr: Any, stable_pane_id: str, deadli
     pane = herdr.current_pane()
     changed = bool(pane and pane.get("pane_id") != stable_pane_id)
     return dirty or changed
+
+
+def attempt_due_reconciliation(
+    context: Any,
+    store: StateStore,
+    herdr: Any,
+    config: Mapping[str, Any],
+) -> None:
+    records = PaneRecords(store)
+    if not records.audit_live_panes([]).maintenance_due:
+        return
+    with FileLock(run_lock_path(context.state_dir), blocking=False) as maintenance_lock:
+        if not maintenance_lock.acquired:
+            return
+        latest_config = load_config(context.config_dir, readonly=True)
+        if reconcile_state_policy(latest_config, store, "automatic-reconciliation") != "keep":
+            return
+        result = records.reconcile_with_herdr(herdr, budget_seconds=0.25)
+    log_debug(
+        store,
+        latest_config,
+        {
+            "event": "pane-reconciliation",
+            **dataclasses.asdict(result),
+        },
+    )

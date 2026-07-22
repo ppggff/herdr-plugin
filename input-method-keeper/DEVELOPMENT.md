@@ -226,7 +226,7 @@ Config lives at `HERDR_PLUGIN_CONFIG_DIR/config.json`.
   "session_name": "auto",
   "default_action": "keep",
   "default_input_source": "com.apple.keylayout.ABC",
-  "notify_on_focus": true,
+  "notify_on_focus": false,
   "pane_status_on_focus": true,
   "focus_log": true,
   "status_ttl_ms": 600000,
@@ -266,8 +266,9 @@ Config semantics:
 - Removing or blanking `default_input_source` means `keep` restores only stored
   pane memory and `reset` does nothing beyond any state clearing already done
   when entering `reset`.
-- `notify_on_focus = true` shows a Herdr notification after each successful
-  focus decision. This is intentionally noisy for early real-world diagnosis.
+- `notify_on_focus = false` keeps fresh v0.3 installs quiet. Existing config
+  values are preserved, including historical `true` values. When enabled it
+  shows a Herdr notification after each successful focus decision.
   Herdr currently renders notification bodies as one practical line, so keep
   notification text to two concise fields: title for the pane losing focus
   (`OLD  CHNG: A -> B (<pane> <workspace>)`) and body for the newly focused pane
@@ -909,7 +910,7 @@ own remembered input source.
 ```toml
 id = "ppggff.input-method-keeper"
 name = "Input Method Keeper"
-version = "0.2.0"
+version = "0.3.0"
 min_herdr_version = "0.7.4"
 description = "Keep macOS input sources stable per Herdr pane."
 platforms = ["macos"]
@@ -1043,8 +1044,9 @@ When debug is enabled, each event/action should log:
 
 Debug logs must avoid unbounded growth. Version 1 writes directly to a
 timestamped active file such as `debug.20260618T103000123456Z.log`.
-`debug.current` stores the active filename. When the active file grows past
-100 MB, create a new timestamped file and update `debug.current`.
+`debug.current` stores the active filename. Version 0.3 uses 10 MiB debug
+segments with three total segments. `focus.log` stays as the active path for
+`tail -F`, rotates at 5 MiB, and keeps two historical segments.
 
 ## Manual Smoke Tests
 
@@ -1226,10 +1228,10 @@ context.
   source changes in real time and associating them with the currently focused
   Herdr pane.
 
-## Planned v0.3
+## Implemented v0.3
 
-The canonical v0.3 plan is [V0.3.md](V0.3.md): **quiet, fast, and
-self-maintaining**.
+The canonical v0.3 design and release record is [V0.3.md](V0.3.md): **quiet,
+fast, and self-maintaining**.
 
 It defines:
 
@@ -1244,8 +1246,8 @@ It defines:
   new public cleanup command.
 
 Keep the detailed behavior and acceptance criteria in `V0.3.md` rather than
-duplicating them here. The current implementation sections above continue to
-describe v0.2 until individual v0.3 slices land.
+duplicating them here. The implementation now follows those v0.3 ownership and
+safety boundaries.
 
 ## Future Ideas
 

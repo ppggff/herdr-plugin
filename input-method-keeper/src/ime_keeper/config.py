@@ -14,7 +14,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "session_name": "auto",
     "default_action": "keep",
     "default_input_source": "com.apple.keylayout.ABC",
-    "notify_on_focus": True,
+    "notify_on_focus": False,
     "pane_status_on_focus": True,
     "focus_log": True,
     "status_ttl_ms": 600000,

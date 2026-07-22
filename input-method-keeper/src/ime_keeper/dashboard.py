@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import sys
 import time
 from datetime import datetime
@@ -9,6 +10,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 from .config import ConfigError, config_path, default_config, load_config
 from .herdr import HerdrClient, pane_parts
 from .input_source import short_input_source
+from .logs import log_health
 from .records import PaneRecords, StateStore, session_identity
 
 def backend_status(config: Mapping[str, Any], backend: Optional[Any]) -> Dict[str, Any]:
@@ -37,7 +39,10 @@ def call_herdr_list(
     if not isinstance(value, list):
         diagnostics.append(f"{label}_invalid")
         return []
-    return [item for item in value if isinstance(item, dict)]
+    if any(not isinstance(item, dict) for item in value):
+        diagnostics.append(f"{label}_invalid")
+        return []
+    return value
 
 
 def display_source(input_source_id: Optional[str]) -> str:
@@ -197,15 +202,23 @@ def collect_dashboard_data(
                     )
                 )
 
+    audit = PaneRecords(store).audit_live_panes(
+        [str(pane.get("pane_id")) for pane in panes if pane.get("pane_id")]
+    )
+    backend_info = backend_status(config, backend)
+    backend_info["healthy"] = current_input_source is not None
+
     return {
         "config": config,
         "identity": identity,
         "state": state if isinstance(state, dict) else None,
         "current_input_source": current_input_source,
-        "backend": backend_status(config, backend),
+        "backend": backend_info,
         "workspaces": workspaces,
         "tabs": tabs,
         "panes": panes,
+        "pane_health": dataclasses.asdict(audit),
+        "logs": log_health(store),
         "diagnostics": diagnostics,
     }
 
@@ -220,6 +233,8 @@ def render_dashboard(data: Mapping[str, Any], color_enabled: bool = False) -> st
     workspaces = data.get("workspaces") if isinstance(data.get("workspaces"), list) else []
     tabs = data.get("tabs") if isinstance(data.get("tabs"), list) else []
     panes = data.get("panes") if isinstance(data.get("panes"), list) else []
+    pane_health = data.get("pane_health") if isinstance(data.get("pane_health"), dict) else {}
+    logs = data.get("logs") if isinstance(data.get("logs"), dict) else {}
     state_panes = state.get("panes", {}) if isinstance(state, dict) and isinstance(state.get("panes"), dict) else {}
 
     workspace_by_id = {
@@ -276,11 +291,22 @@ def render_dashboard(data: Mapping[str, Any], color_enabled: bool = False) -> st
             f"{dashboard_plain_setting('default', display_source(config.get('default_input_source')))} "
             f"{dashboard_plain_setting('current', display_source(data.get('current_input_source')))} "
             f"{dashboard_plain_setting('backend', str(backend.get('name') or '-'))} "
-            f"{dashboard_plain_setting('panes', f'live:{live_count}/state:{state_count}')}"
+            f"{dashboard_plain_setting('panes', f'live:{live_count}/state:{state_count}')} "
+            f"{dashboard_plain_setting('unmatched', str(len(pane_health.get('unmatched_ids', []))))} "
+            f"{dashboard_plain_setting('missing', str(len(pane_health.get('missing_ids', []))))}"
         ),
     ]
     if diagnostics:
         lines.append("diagnostics=" + " | ".join(str(item) for item in diagnostics))
+    focus_logs = logs.get("focus") if isinstance(logs.get("focus"), dict) else {}
+    debug_logs = logs.get("debug") if isinstance(logs.get("debug"), dict) else {}
+    lines.append(
+        "health="
+        f"backend:{'ok' if backend.get('healthy') else 'error'} "
+        f"reconcile:{'due' if pane_health.get('maintenance_due', True) else 'ok'} "
+        f"focus-log:{focus_logs.get('bytes', 0)}B/{focus_logs.get('segments', 0)} "
+        f"debug-log:{debug_logs.get('bytes', 0)}B/{debug_logs.get('segments', 0)}"
+    )
     lines.append("")
 
     if not workspace_ids:

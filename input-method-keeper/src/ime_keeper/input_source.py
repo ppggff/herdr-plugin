@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -88,20 +89,32 @@ class BackendExecutor:
         return self._run(self.current_args)
 
 
-def ensure_input_source_details(backend: Any, target: str) -> Dict[str, Any]:
+_UNKNOWN_CURRENT = object()
+
+
+def ensure_input_source_details(
+    backend: Any, target: str, known_current: Any = _UNKNOWN_CURRENT
+) -> Dict[str, Any]:
     details: Dict[str, Any] = {
         "target": target,
         "current": None,
         "action": "no-target",
     }
     if not target:
+        details["current_ms"] = 0.0
+        details["select_ms"] = 0.0
         return details
-    current = backend.current()
+    current_started = time.monotonic()
+    current = backend.current() if known_current is _UNKNOWN_CURRENT else str(known_current)
+    details["current_ms"] = (time.monotonic() - current_started) * 1000
+    details["select_ms"] = 0.0
     details["current"] = current
     if current == target:
         details["action"] = "already-current"
         return details
+    select_started = time.monotonic()
     result = backend.select(target)
+    details["select_ms"] = (time.monotonic() - select_started) * 1000
     if isinstance(result, CommandResult) and not result.ok:
         raise RuntimeError(result.stderr or "backend select failed")
     details["action"] = "selected"

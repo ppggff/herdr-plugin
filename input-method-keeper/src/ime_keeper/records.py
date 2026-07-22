@@ -4,25 +4,22 @@ import dataclasses
 import hashlib
 import json
 import re
-import shutil
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from ._files import (
     FileLock,
     atomic_write_json,
-    atomic_write_text,
     backup_path,
     contextlib_suppress_file_not_found,
     run_lock_path,
-    timestamp_for_filename,
 )
 from .config import load_config, record_policy
+from .logs import DEBUG_LOG_MAX_BYTES, log_debug
 
-DEBUG_LOG_MAX_BYTES = 100 * 1024 * 1024
-DEBUG_LOG_NAME_RE = re.compile(r"^debug\.\d{8}T\d{12}Z\.log$")
+RECONCILE_INTERVAL = timedelta(hours=24)
 
 @dataclasses.dataclass(frozen=True)
 class SessionIdentity:
@@ -129,6 +126,9 @@ class StateStore:
         last_focused = state.get("last_focused_pane_id")
         if last_focused is not None and not isinstance(last_focused, str):
             raise ValueError("last_focused_pane_id must be a string or null")
+        last_reconciled = state.get("last_reconciled_at")
+        if last_reconciled is not None and not isinstance(last_reconciled, str):
+            raise ValueError("last_reconciled_at must be a string or null")
         for pane_id, pane_state in state["panes"].items():
             if not isinstance(pane_id, str):
                 raise ValueError("pane id must be a string")
@@ -181,6 +181,24 @@ class FocusMemory:
     target_stored_source: Optional[str]
 
 
+@dataclasses.dataclass(frozen=True)
+class PaneAudit:
+    live: int
+    stored: int
+    unmatched_ids: Tuple[str, ...]
+    missing_ids: Tuple[str, ...]
+    last_reconciled_at: Optional[str]
+    maintenance_due: bool
+
+
+@dataclasses.dataclass(frozen=True)
+class ReconcileResult:
+    completed: bool
+    pruned_ids: Tuple[str, ...] = ()
+    unknown_ids: Tuple[str, ...] = ()
+    reason: Optional[str] = None
+
+
 class PaneRecords:
     """Own pane-memory reads and atomic record updates for one Herdr session."""
 
@@ -204,6 +222,101 @@ class PaneRecords:
     def repair_and_snapshot(self) -> Tuple[Dict[str, Any], Optional[str]]:
         state = self._load_for_update()
         return state, self.last_diagnostic
+
+    def audit_live_panes(
+        self,
+        live_pane_ids: List[str],
+        now: Optional[datetime] = None,
+    ) -> PaneAudit:
+        state, diagnostic = self.snapshot()
+        self.last_diagnostic = diagnostic
+        live_ids = {str(pane_id) for pane_id in live_pane_ids if str(pane_id)}
+        panes = state.get("panes", {}) if isinstance(state, dict) else {}
+        stored_ids = {str(pane_id) for pane_id in panes} if isinstance(panes, dict) else set()
+        last_reconciled_at = state.get("last_reconciled_at") if isinstance(state, dict) else None
+        if not isinstance(last_reconciled_at, str):
+            last_reconciled_at = None
+        return PaneAudit(
+            live=len(live_ids),
+            stored=len(stored_ids),
+            unmatched_ids=tuple(sorted(stored_ids - live_ids)),
+            missing_ids=tuple(sorted(live_ids - stored_ids)),
+            last_reconciled_at=last_reconciled_at,
+            maintenance_due=reconciliation_due(last_reconciled_at, now=now),
+        )
+
+    def reconcile_live_panes(
+        self,
+        live_pane_ids: List[str],
+        presence: Any,
+        now: Optional[datetime] = None,
+        can_commit: Optional[Any] = None,
+    ) -> ReconcileResult:
+        live_ids = {str(pane_id) for pane_id in live_pane_ids if str(pane_id)}
+        state = self._load_for_update()
+        panes = state.setdefault("panes", {})
+        focused_id = state.get("last_focused_pane_id")
+        if not live_ids:
+            return ReconcileResult(False, reason="empty-live-pane-list")
+        if isinstance(focused_id, str) and focused_id and focused_id not in live_ids:
+            return ReconcileResult(False, reason="focused-pane-missing")
+        pruned: List[str] = []
+        unknown: List[str] = []
+        for pane_id in sorted(set(panes) - live_ids):
+            result = presence(pane_id)
+            if result == "absent":
+                panes.pop(pane_id, None)
+                pruned.append(pane_id)
+            elif result != "present":
+                unknown.append(pane_id)
+        completed = not unknown
+        if completed:
+            state["last_reconciled_at"] = (now or datetime.now(timezone.utc)).isoformat()
+        if can_commit is not None and not can_commit():
+            return ReconcileResult(False, reason="budget-expired")
+        if pruned or completed:
+            self.store.save(state)
+        return ReconcileResult(
+            completed,
+            pruned_ids=tuple(pruned),
+            unknown_ids=tuple(unknown),
+            reason=None if completed else "pane-presence-unknown",
+        )
+
+    def reconcile_with_herdr(self, herdr: Any, budget_seconds: float) -> ReconcileResult:
+        deadline = time.monotonic() + max(0.0, budget_seconds)
+
+        def remaining() -> float:
+            return max(0.0, deadline - time.monotonic())
+
+        timeout = remaining()
+        if timeout <= 0:
+            return ReconcileResult(False, reason="budget-expired")
+        try:
+            live_panes = herdr.list_panes_socket(timeout)
+        except Exception as exc:
+            return ReconcileResult(False, reason=f"pane-list-failed: {exc}")
+        if live_panes is None:
+            return ReconcileResult(False, reason="pane-list-unavailable-or-invalid")
+        live_ids = [str(pane.get("pane_id")) for pane in live_panes]
+
+        def presence(pane_id: str) -> str:
+            timeout = remaining()
+            if timeout <= 0:
+                return "unknown"
+            try:
+                return str(herdr.pane_presence_socket(pane_id, timeout))
+            except Exception:
+                return "unknown"
+
+        try:
+            return self.reconcile_live_panes(
+                live_ids,
+                presence,
+                can_commit=lambda: remaining() > 0,
+            )
+        except (OSError, RecordsUnavailable) as exc:
+            return ReconcileResult(False, reason=f"state-update-failed: {exc}")
 
     def focus_memory(self, target_pane_id: str) -> FocusMemory:
         state = self._load_for_update()
@@ -302,60 +415,17 @@ def reconcile_state_policy(config: Mapping[str, Any], store: StateStore, cause: 
     return mode
 
 
-def timestamped_debug_log_path(store: StateStore) -> Path:
-    return store.session_dir / f"debug.{timestamp_for_filename()}.log"
-
-
-def read_current_debug_log_path(store: StateStore) -> Optional[Path]:
+def reconciliation_due(value: Optional[str], now: Optional[datetime] = None) -> bool:
+    if not value:
+        return True
     try:
-        name = store.debug_current_path.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        return None
-    if not DEBUG_LOG_NAME_RE.fullmatch(name):
-        return None
-    return store.session_dir / name
+        timestamp = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return True
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    return (now or datetime.now(timezone.utc)) - timestamp >= RECONCILE_INTERVAL
 
-
-def write_current_debug_log_path(store: StateStore, path: Path) -> None:
-    atomic_write_text(store.debug_current_path, path.name + "\n")
-
-
-def migrate_legacy_debug_log(store: StateStore) -> Optional[Path]:
-    if not store.debug_path.exists():
-        return None
-    target = timestamped_debug_log_path(store)
-    store.debug_path.rename(target)
-    return target
-
-
-def resolve_debug_log_path(store: StateStore) -> Path:
-    store.session_dir.mkdir(parents=True, exist_ok=True)
-    migrated_path = migrate_legacy_debug_log(store)
-    current_path = read_current_debug_log_path(store)
-    if current_path is None:
-        current_path = migrated_path or timestamped_debug_log_path(store)
-        write_current_debug_log_path(store, current_path)
-    if current_path.exists() and current_path.stat().st_size > DEBUG_LOG_MAX_BYTES:
-        current_path = timestamped_debug_log_path(store)
-        write_current_debug_log_path(store, current_path)
-    return current_path
-
-
-def log_debug(store: StateStore, config: Mapping[str, Any], message: Mapping[str, Any]) -> None:
-    if not bool(config.get("debug", False)):
-        return
-    debug_path = resolve_debug_log_path(store)
-    line = json.dumps(
-        {
-            "timestamp": utc_now(),
-            "session_label": store.identity.label,
-            "session_key": store.identity.key,
-            **dict(message),
-        },
-        ensure_ascii=False,
-    )
-    with debug_path.open("a", encoding="utf-8") as handle:
-        handle.write(line + "\n")
 
 def pane_metadata(pane: Mapping[str, Any]) -> Dict[str, Any]:
     metadata: Dict[str, Any] = {}

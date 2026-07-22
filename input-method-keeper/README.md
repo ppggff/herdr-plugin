@@ -16,10 +16,10 @@ Version 1 is intentionally small:
 - one global default action: `keep`, `reset`, or `ignore`
 - no rule engine yet
 
-For design and development details, see [DEVELOPMENT.md](DEVELOPMENT.md). The
-planned [v0.3 maintenance release](V0.3.md) focuses on quiet defaults, lower
-focus-path overhead, bounded logs, and automatic current-session pane-memory
-maintenance. Those behaviors are not part of v0.2 yet.
+For design and development details, see [DEVELOPMENT.md](DEVELOPMENT.md).
+Version 0.3 adds quiet defaults, lower focus-path overhead, bounded logs, and
+guarded automatic current-session pane-memory maintenance. See
+[V0.3.md](V0.3.md) for its invariants and validation evidence.
 
 ## Requirements
 
@@ -67,7 +67,7 @@ Install the current release with Herdr's GitHub shorthand:
 
 ```sh
 herdr plugin install ppggff/herdr-plugin/input-method-keeper \
-  --ref v0.2.0 --yes
+  --ref v0.3.0 --yes
 ```
 
 The install preview includes `bin/prepare-install`. Herdr runs it before
@@ -233,6 +233,8 @@ The dashboard refreshes in place and keeps the output compact:
 - current session label
 - enabled/debug/default action/backend/default/current input source
 - current macOS input source reported by the backend
+- live/stored/unmatched/missing pane-memory health and reconciliation status
+- backend health and bounded focus/debug log sizes and segment counts
 - live Herdr workspaces and tabs
 - each pane as only `pane-id=status`
 
@@ -282,7 +284,7 @@ fields look like this:
   "session_name": "auto",
   "default_action": "keep",
   "default_input_source": "com.apple.keylayout.ABC",
-  "notify_on_focus": true,
+  "notify_on_focus": false,
   "pane_status_on_focus": true,
   "focus_log": true,
   "status_ttl_ms": 600000,
@@ -310,6 +312,10 @@ Most users should only change:
 `session_name = "auto"` is recommended. The plugin stores state separately per
 Herdr session using the Herdr socket path, so different sessions do not share
 pane memory.
+
+Fresh v0.3 configs keep notifications off. Existing config files are not
+rewritten, so an earlier or explicit `"notify_on_focus": true` remains true
+after upgrade.
 
 When `pane_status_on_focus` is enabled, the plugin reports the short input-source
 name as the pane metadata token `ime`. Herdr exposes it as `tokens.ime` from
@@ -520,8 +526,9 @@ the issue, then run `Show input method keeper status`. For a first multi-day
 trial, keeping debug enabled is recommended. It appends JSON lines to the
 current session's active `debug.<UTC timestamp>.log` file, for example
 `debug.20260618T103000123456Z.log`. The small `debug.current` file contains
-the active log filename. When the active log grows past 100 MB, the plugin
-starts a new timestamped log and updates `debug.current`.
+the active log filename. Debug logs use 10 MiB segments and retain three
+segments (30 MiB maximum). `focus.log` remains the active path for `tail -F`,
+rotates at 5 MiB, and retains two historical segments (15 MiB maximum).
 
 Focus debug entries include the decision context needed to diagnose most
 issues:
@@ -535,9 +542,10 @@ issues:
 - select action: `selected`, `already-current`, or `no-target`
 - skip/failure reason when no switch happens
 
-By default, each successful focus decision also shows a compact Herdr
-notification. Herdr currently renders notification bodies as a single line in
-practice, so the plugin uses only the title and one body line:
+When `notify_on_focus` is enabled, each successful focus decision also shows a
+compact Herdr notification. It is off for new v0.3 configs. Herdr currently
+renders notification bodies as a single line in practice, so the plugin uses
+only the title and one body line:
 
 ```text
 title: OLD  CHNG: ABC -> ITABC (<pane> <workspace>)
@@ -609,13 +617,12 @@ input-method-keeper/scripts/herdr_smoke.py --link --full-ime
   symptom in Herdr; the limitation remains for the default `macism` backend.
 - Version 1 has no rule engine and no ignore list.
 - Current-session pane records normally follow `pane.closed`, `tab.closed`,
-  `pane.moved`, and `workspace.closed`, but a missed lifecycle event can leave a
-  stale record. Version 0.2 does not reconcile those records against the live
-  pane list.
+  `pane.moved`, and `workspace.closed`. Version 0.3 also performs guarded
+  reconciliation at most once per 24 hours; ambiguous list/get evidence is
+  retained rather than deleted.
 - Stale non-current session directories are removed only by `doctor-gc-all` /
   `doctor --gc-all`, or by a future Herdr session lifecycle event.
 
-The planned [v0.3 release](V0.3.md) adds guarded, low-frequency reconciliation
-for stale pane records in the current session. Routine cleanup will be
-automatic; doctor remains an inspection and recovery tool rather than a normal
-usage requirement.
+Routine current-session cleanup is automatic. `doctor --gc-all` remains the
+forced reconciliation and old-session recovery path, not a normal usage
+requirement.

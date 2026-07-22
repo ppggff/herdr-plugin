@@ -21,6 +21,7 @@ from .dashboard import backend_status, run_dashboard
 from .focus import handle_pane_focused
 from .herdr import HerdrClient
 from .input_source import BackendExecutor, CommandResult
+from .logs import log_health
 from .records import (
     PaneRecords,
     RecordsUnavailable,
@@ -133,7 +134,9 @@ def handle_event(
         return handle_cleanup_event(context, store, parsed, "workspace")
     return 0
 
-def print_status(env: Mapping[str, str], backend: Optional[Any] = None) -> int:
+def print_status(
+    env: Mapping[str, str], backend: Optional[Any] = None, herdr: Optional[Any] = None
+) -> int:
     config_dir = Path(env.get("HERDR_PLUGIN_CONFIG_DIR", "."))
     state_dir = Path(env.get("HERDR_PLUGIN_STATE_DIR", "."))
     diagnostics: List[str] = []
@@ -155,6 +158,23 @@ def print_status(env: Mapping[str, str], backend: Optional[Any] = None) -> int:
             current_input_source = backend.current()
         except Exception as exc:
             diagnostics.append(f"backend_current_failed: {exc}")
+    pane_health = None
+    herdr = herdr if herdr is not None else HerdrClient(env)
+    try:
+        live_panes = herdr.list_panes()
+        if not isinstance(live_panes, list) or any(
+            not isinstance(pane, dict) or not isinstance(pane.get("pane_id"), str)
+            for pane in live_panes
+        ):
+            raise ValueError("invalid pane list")
+        audit = PaneRecords(store).audit_live_panes(
+            [str(pane["pane_id"]) for pane in live_panes]
+        )
+        pane_health = dataclasses.asdict(audit)
+    except Exception as exc:
+        diagnostics.append(f"pane_list_failed: {exc}")
+    backend_info = backend_status(config, backend)
+    backend_info["healthy"] = current_input_source is not None
     output = {
         "enabled": config.get("enabled"),
         "debug": config.get("debug"),
@@ -166,10 +186,12 @@ def print_status(env: Mapping[str, str], backend: Optional[Any] = None) -> int:
         "pane_status_on_focus": config.get("pane_status_on_focus"),
         "focus_log": config.get("focus_log"),
         "focus_log_path": str(store.focus_log_path),
+        "logs": log_health(store),
         "status_ttl_ms": config.get("status_ttl_ms"),
-        "backend": backend_status(config, backend),
+        "backend": backend_info,
         "current_input_source": current_input_source,
         "state": state,
+        "pane_health": pane_health,
         "diagnostics": diagnostics,
     }
     print(json.dumps(output, ensure_ascii=False, indent=2))
@@ -224,6 +246,7 @@ def doctor(
             "policy": mode,
             "backend_current": None,
             "current_pane": None,
+            "logs": log_health(store),
         }
         try:
             result["backend_current"] = backend.current()
@@ -233,6 +256,19 @@ def doctor(
             result["current_pane"] = herdr.current_pane()
         except Exception as exc:
             result["herdr_error"] = str(exc)
+        try:
+            doctor_live_panes = herdr.list_panes()
+            if not isinstance(doctor_live_panes, list) or any(
+                not isinstance(pane, dict) or not isinstance(pane.get("pane_id"), str)
+                for pane in doctor_live_panes
+            ):
+                raise ValueError("invalid pane list")
+            doctor_audit = PaneRecords(store).audit_live_panes(
+                [str(pane["pane_id"]) for pane in doctor_live_panes]
+            )
+            result["pane_health"] = dataclasses.asdict(doctor_audit)
+        except Exception as exc:
+            result["pane_health_error"] = str(exc)
         if select_self_test:
             target = result.get("backend_current")
             if target:
@@ -255,6 +291,18 @@ def doctor(
                     "error": "skipped: backend current failed",
                 }
         if gc_all:
+            if mode == "keep":
+                reconciliation = PaneRecords(store).reconcile_with_herdr(
+                    herdr, budget_seconds=2.0
+                )
+                result["reconciliation"] = dataclasses.asdict(reconciliation)
+            else:
+                result["reconciliation"] = {
+                    "completed": False,
+                    "pruned_ids": [],
+                    "unknown_ids": [],
+                    "reason": f"policy-{mode}",
+                }
             result["gc_deleted"] = gc_sessions(context.state_dir, context.identity.key)
         print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
@@ -304,7 +352,7 @@ def main(
         return 2
     command = argv[0]
     if command == "status":
-        return print_status(actual_env, backend=backend)
+        return print_status(actual_env, backend=backend, herdr=herdr)
     if command == "dashboard":
         once = False
         interval_seconds = 1.0

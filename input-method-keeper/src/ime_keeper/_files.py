@@ -57,11 +57,16 @@ class FileLock:
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        self.release()
+        return False
+
+    def release(self) -> None:
         if self.handle is not None:
             if self.acquired:
                 fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
             self.handle.close()
-        return False
+            self.handle = None
+            self.acquired = False
 
 
 def run_lock_path(state_dir: Path) -> Path:

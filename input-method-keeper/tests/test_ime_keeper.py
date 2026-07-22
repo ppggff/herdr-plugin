@@ -56,6 +56,8 @@ class FakeHerdr:
         self.tabs = []
         self.panes = []
         self.list_tab_args = []
+        self.presence = {}
+        self.reconcile_timeouts = []
 
     def current_pane(self):
         pane_id = self.pane_ids.pop(0) if self.pane_ids else ""
@@ -96,6 +98,14 @@ class FakeHerdr:
             return [pane for pane in self.panes if pane.get("workspace_id") == workspace_id]
         return list(self.panes)
 
+    def list_panes_socket(self, timeout):
+        self.reconcile_timeouts.append(timeout)
+        return list(self.panes)
+
+    def pane_presence_socket(self, pane_id, timeout):
+        self.reconcile_timeouts.append(timeout)
+        return self.presence.get(pane_id, "unknown")
+
 
 class FailingPublicationHerdr(FakeHerdr):
     def show_notification(self, title, body):
@@ -131,34 +141,48 @@ class TempEnvTest(unittest.TestCase):
 
 
 class HerdrClientTests(unittest.TestCase):
-    def test_report_pane_status_publishes_named_ime_token(self):
-        client = ime_keeper.HerdrClient({"HERDR_BIN_PATH": "/usr/local/bin/herdr"})
-        completed = mock.Mock(returncode=0, stdout="", stderr="")
-
-        with mock.patch("ime_keeper.herdr.subprocess.run", return_value=completed) as run:
-            result = client.report_pane_status("w1:p2", "ITABC", 600000)
-
-        self.assertTrue(result.ok)
-        run.assert_called_once_with(
-            [
-                "/usr/local/bin/herdr",
-                "pane",
-                "report-metadata",
-                "w1:p2",
-                "--source",
-                "ppggff.input-method-keeper",
-                "--token",
-                "ime=ITABC",
-                "--ttl-ms",
-                "600000",
-            ],
-            text=True,
-            stdout=ime_keeper.herdr.subprocess.PIPE,
-            stderr=ime_keeper.herdr.subprocess.PIPE,
-            timeout=1.5,
-            check=False,
-            env=mock.ANY,
+    def test_event_publications_use_socket_without_cli_fallback(self):
+        client = ime_keeper.HerdrClient(
+            {"HERDR_SOCKET_PATH": "/tmp/herdr.sock", "HERDR_BIN_PATH": "/usr/local/bin/herdr"}
         )
+        responses = [
+            {"result": {"type": "ok"}},
+            {"result": {"type": "notification_show", "shown": True}},
+        ]
+
+        with mock.patch.object(client, "_socket_request", side_effect=responses) as request, mock.patch(
+            "ime_keeper.herdr.subprocess.run"
+        ) as run:
+            metadata = client.report_pane_status("w1:p2", "ITABC", 600000)
+            notification = client.show_notification("title", "body")
+
+        self.assertTrue(metadata.ok)
+        self.assertTrue(notification.ok)
+        self.assertEqual(
+            request.call_args_list[0].args[:2],
+            (
+                "pane.report_metadata",
+                {
+                    "pane_id": "w1:p2",
+                    "source": "ppggff.input-method-keeper",
+                    "tokens": {"ime": "ITABC"},
+                    "ttl_ms": 600000,
+                },
+            ),
+        )
+        self.assertEqual(request.call_args_list[1].args[1]["position"], "top-right")
+        run.assert_not_called()
+
+    def test_socket_pane_list_is_all_or_nothing_and_presence_requires_explicit_not_found(self):
+        client = ime_keeper.HerdrClient({"HERDR_SOCKET_PATH": "/tmp/herdr.sock"})
+        malformed = {"result": {"type": "pane_list", "panes": [{"pane_id": "w1:p1"}, {}]}}
+        absent = {"error": {"code": "pane_not_found", "message": "pane not found"}}
+        other_error = {"error": {"code": "internal", "message": "try again"}}
+
+        with mock.patch.object(client, "_socket_request", side_effect=[malformed, absent, other_error]):
+            self.assertIsNone(client.list_panes_socket(0.25))
+            self.assertEqual(client.pane_presence_socket("w1:gone", 0.2), "absent")
+            self.assertEqual(client.pane_presence_socket("w1:maybe", 0.1), "unknown")
 
 
 class SessionIdentityTests(TempEnvTest):
@@ -306,6 +330,135 @@ class PaneRecordsTests(TempEnvTest):
         self.assertEqual(snapshot["panes"]["w1:p2"]["input_source_id"], "target-source")
         self.assertEqual(snapshot["panes"]["w1:p2"]["cwd"], "/repo/new")
 
+    def test_live_pane_audit_is_read_only_and_uses_unmatched_language(self):
+        self.write_config()
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        state = ime_keeper.empty_state(context.identity)
+        state["panes"] = {"w1:p1": {}, "w1:old": {}}
+        store.save(state)
+        before = store.state_path.read_bytes()
+
+        audit = ime_keeper.PaneRecords(store).audit_live_panes(["w1:p1", "w1:new"])
+
+        self.assertEqual(audit.live, 2)
+        self.assertEqual(audit.stored, 2)
+        self.assertEqual(audit.unmatched_ids, ("w1:old",))
+        self.assertEqual(audit.missing_ids, ("w1:new",))
+        self.assertTrue(audit.maintenance_due)
+        self.assertEqual(store.state_path.read_bytes(), before)
+
+    def test_reconcile_prunes_only_confirmed_absent_and_stays_due_on_unknown(self):
+        self.write_config()
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        state = ime_keeper.empty_state(context.identity)
+        state["last_focused_pane_id"] = "w1:p1"
+        state["panes"] = {"w1:p1": {}, "w1:gone": {}, "w1:maybe": {}}
+        store.save(state)
+        records = ime_keeper.PaneRecords(store)
+
+        result = records.reconcile_live_panes(
+            ["w1:p1"],
+            lambda pane_id: {"w1:gone": "absent", "w1:maybe": "unknown"}[pane_id],
+        )
+
+        snapshot, _ = records.snapshot()
+        self.assertEqual(result.pruned_ids, ("w1:gone",))
+        self.assertEqual(result.unknown_ids, ("w1:maybe",))
+        self.assertFalse(result.completed)
+        self.assertNotIn("last_reconciled_at", snapshot)
+        self.assertEqual(set(snapshot["panes"]), {"w1:p1", "w1:maybe"})
+
+    def test_reconcile_rejects_empty_or_focus_omitting_live_snapshot(self):
+        self.write_config()
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        state = ime_keeper.empty_state(context.identity)
+        state["last_focused_pane_id"] = "w1:p1"
+        state["panes"] = {"w1:p1": {}, "w1:old": {}}
+        store.save(state)
+        records = ime_keeper.PaneRecords(store)
+
+        empty = records.reconcile_live_panes([], lambda _pane_id: "absent")
+        omitted = records.reconcile_live_panes(["w1:p2"], lambda _pane_id: "absent")
+
+        snapshot, _ = records.snapshot()
+        self.assertFalse(empty.completed)
+        self.assertFalse(omitted.completed)
+        self.assertEqual(set(snapshot["panes"]), {"w1:p1", "w1:old"})
+
+    def test_reconcile_socket_calls_share_one_budget(self):
+        self.write_config()
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        state = ime_keeper.empty_state(context.identity)
+        state["last_focused_pane_id"] = "w1:p1"
+        state["panes"] = {"w1:p1": {}, "w1:old": {}}
+        store.save(state)
+        herdr = FakeHerdr([])
+        herdr.panes = [{"pane_id": "w1:p1"}]
+        herdr.presence = {"w1:old": "absent"}
+
+        result = ime_keeper.PaneRecords(store).reconcile_with_herdr(herdr, budget_seconds=0.25)
+
+        self.assertTrue(result.completed)
+        self.assertEqual(result.pruned_ids, ("w1:old",))
+        self.assertEqual(len(herdr.reconcile_timeouts), 2)
+        self.assertTrue(all(0 < value <= 0.25 for value in herdr.reconcile_timeouts))
+        self.assertLessEqual(herdr.reconcile_timeouts[1], herdr.reconcile_timeouts[0])
+
+    def test_reconcile_save_failure_keeps_persisted_records_and_timestamp_due(self):
+        self.write_config()
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        state = ime_keeper.empty_state(context.identity)
+        state["last_focused_pane_id"] = "w1:p1"
+        state["panes"] = {"w1:p1": {}, "w1:old": {}}
+        store.save(state)
+        herdr = FakeHerdr([])
+        herdr.panes = [{"pane_id": "w1:p1"}]
+        herdr.presence = {"w1:old": "absent"}
+
+        with mock.patch.object(store, "save", side_effect=OSError("disk full")):
+            result = ime_keeper.PaneRecords(store).reconcile_with_herdr(
+                herdr, budget_seconds=0.25
+            )
+
+        snapshot, _ = ime_keeper.PaneRecords(store).snapshot()
+        self.assertFalse(result.completed)
+        self.assertIn("state-update-failed", result.reason)
+        self.assertEqual(set(snapshot["panes"]), {"w1:p1", "w1:old"})
+        self.assertNotIn("last_reconciled_at", snapshot)
+
+    def test_reconcile_budget_expiry_does_not_commit_partial_prunes(self):
+        self.write_config()
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        state = ime_keeper.empty_state(context.identity)
+        state["last_focused_pane_id"] = "w1:p1"
+        state["panes"] = {"w1:p1": {}, "w1:old": {}}
+        store.save(state)
+
+        class SlowHerdr(FakeHerdr):
+            def pane_presence_socket(inner_self, pane_id, timeout):
+                import time
+
+                time.sleep(0.02)
+                return "absent"
+
+        herdr = SlowHerdr([])
+        herdr.panes = [{"pane_id": "w1:p1"}]
+
+        result = ime_keeper.PaneRecords(store).reconcile_with_herdr(
+            herdr, budget_seconds=0.01
+        )
+
+        snapshot, _ = ime_keeper.PaneRecords(store).snapshot()
+        self.assertFalse(result.completed)
+        self.assertEqual(result.reason, "budget-expired")
+        self.assertEqual(set(snapshot["panes"]), {"w1:p1", "w1:old"})
+
 
 class BackendTests(unittest.TestCase):
     def test_ensure_input_source_skips_select_when_already_current(self):
@@ -315,6 +468,16 @@ class BackendTests(unittest.TestCase):
 
         self.assertEqual(result, "already-current")
         self.assertEqual(backend.selected, [])
+
+    def test_ensure_input_source_reuses_validated_known_current(self):
+        backend = FakeBackend(["must-not-be-read"])
+
+        result = ime_keeper.ensure_input_source_details(
+            backend, "com.apple.keylayout.ABC", known_current="com.apple.keylayout.ABC"
+        )
+
+        self.assertEqual(result["action"], "already-current")
+        self.assertEqual(backend.current_calls, 0)
 
     def test_backend_executor_does_not_split_string_args_or_crash_on_null_args(self):
         config = ime_keeper.default_config()
@@ -337,6 +500,12 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config["backend"]["name"], "herdr-ime-helper")
         self.assertEqual(config["backend"]["current_args"], ["current"])
+        self.assertFalse(config["notify_on_focus"])
+
+    def test_existing_notification_setting_survives_quiet_default(self):
+        config = ime_keeper.merge_config({"notify_on_focus": True})
+
+        self.assertTrue(config["notify_on_focus"])
 
     def test_existing_macism_config_is_not_migrated_when_native_helper_exists(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -416,8 +585,9 @@ class ConfigTests(unittest.TestCase):
 
 
 class DebugLoggingTests(TempEnvTest):
-    def test_debug_log_rotation_threshold_is_100mb(self):
-        self.assertEqual(ime_keeper.DEBUG_LOG_MAX_BYTES, 100 * 1024 * 1024)
+    def test_v03_log_budgets_are_fixed(self):
+        self.assertEqual(ime_keeper.DEBUG_LOG_MAX_BYTES, 10 * 1024 * 1024)
+        self.assertEqual(ime_keeper.FOCUS_LOG_MAX_BYTES, 5 * 1024 * 1024)
 
     def test_debug_log_uses_timestamped_current_filename(self):
         self.write_config(debug=True)
@@ -439,13 +609,13 @@ class DebugLoggingTests(TempEnvTest):
         old_path = store.session_dir / "debug.20260618T010203000001Z.log"
         old_path.write_text("old log line\n", encoding="utf-8")
         store.debug_current_path.write_text(old_path.name + "\n", encoding="utf-8")
-        original_limit = ime_keeper.records.DEBUG_LOG_MAX_BYTES
+        original_limit = ime_keeper.logs.DEBUG_LOG_MAX_BYTES
 
         try:
-            ime_keeper.records.DEBUG_LOG_MAX_BYTES = 1
+            ime_keeper.logs.DEBUG_LOG_MAX_BYTES = 1
             ime_keeper.log_debug(store, context.config, {"event": "test"})
         finally:
-            ime_keeper.records.DEBUG_LOG_MAX_BYTES = original_limit
+            ime_keeper.logs.DEBUG_LOG_MAX_BYTES = original_limit
 
         rotated = list(store.session_dir.glob("debug.*.log"))
         self.assertEqual(len(rotated), 2)
@@ -471,6 +641,45 @@ class DebugLoggingTests(TempEnvTest):
         self.assertEqual(lines[0], "legacy log line")
         self.assertEqual(json.loads(lines[-1])["event"], "test")
         self.assertFalse(store.debug_path.exists())
+
+    def test_focus_log_rotation_keeps_active_path_and_two_segments(self):
+        self.write_config()
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        store.session_dir.mkdir(parents=True)
+        original_limit = ime_keeper.logs.FOCUS_LOG_MAX_BYTES
+
+        try:
+            ime_keeper.logs.FOCUS_LOG_MAX_BYTES = 1
+            for index in range(4):
+                ime_keeper.logs.append_focus_line(store, f"line-{index}")
+        finally:
+            ime_keeper.logs.FOCUS_LOG_MAX_BYTES = original_limit
+
+        self.assertTrue(store.focus_log_path.exists())
+        self.assertEqual(store.focus_log_path.read_text(encoding="utf-8"), "line-3\n")
+        self.assertEqual(len(list(store.session_dir.glob("focus.*.log"))), 2)
+        health = ime_keeper.log_health(store)
+        self.assertEqual(health["focus"]["segments"], 3)
+
+    def test_debug_log_retention_keeps_current_pointer_and_three_segments(self):
+        self.write_config(debug=True)
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        store.session_dir.mkdir(parents=True)
+        names = [
+            f"debug.20260722T01020{index}000001Z.log" for index in range(1, 5)
+        ]
+        for name in names:
+            (store.session_dir / name).write_text("old\n", encoding="utf-8")
+        store.debug_current_path.write_text(names[-1] + "\n", encoding="utf-8")
+
+        ime_keeper.log_debug(store, context.config, {"event": "new"})
+
+        retained = list(store.session_dir.glob("debug.*.log"))
+        current_name = store.debug_current_path.read_text(encoding="utf-8").strip()
+        self.assertEqual(len(retained), 3)
+        self.assertTrue((store.session_dir / current_name).exists())
 
 
 class EventParsingTests(unittest.TestCase):
@@ -510,11 +719,140 @@ class EventParsingTests(unittest.TestCase):
 
 
 class EventHandlerTests(TempEnvTest):
+    def test_busy_run_lock_leaves_automatic_reconciliation_due_for_retry(self):
+        self.write_config(default_action="keep")
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        state = ime_keeper.empty_state(context.identity)
+        state["last_focused_pane_id"] = "w1:p1"
+        state["panes"] = {"w1:p1": {}}
+        store.save(state)
+        herdr = FakeHerdr([])
+        herdr.panes = [{"pane_id": "w1:p1"}]
+
+        with ime_keeper.FileLock(ime_keeper.run_lock_path(self.state_dir), blocking=True):
+            ime_keeper.focus.attempt_due_reconciliation(
+                context, store, herdr, context.config
+            )
+
+        snapshot, _ = ime_keeper.PaneRecords(store).snapshot()
+        self.assertNotIn("last_reconciled_at", snapshot)
+        self.assertEqual(herdr.reconcile_timeouts, [])
+
+    def test_automatic_reconciliation_rechecks_policy_before_state_update(self):
+        self.write_config(default_action="reset")
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        state = ime_keeper.empty_state(context.identity)
+        state["last_focused_pane_id"] = "w1:p1"
+        state["panes"] = {"w1:p1": {}}
+        store.save(state)
+        herdr = FakeHerdr([])
+        herdr.panes = [{"pane_id": "w1:p1"}]
+
+        ime_keeper.focus.attempt_due_reconciliation(context, store, herdr, context.config)
+
+        self.assertFalse(store.state_path.exists())
+        self.assertEqual(herdr.reconcile_timeouts, [])
+    def test_due_reconciliation_runs_after_restore_and_prunes_confirmed_absent(self):
+        self.write_config(default_action="keep", debug=True)
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        state = ime_keeper.empty_state(context.identity)
+        state["last_focused_pane_id"] = "w1:p1"
+        state["panes"] = {
+            "w1:p1": {"input_source_id": "abc"},
+            "w1:p2": {"input_source_id": "target"},
+            "w1:old": {"input_source_id": "old"},
+        }
+        store.save(state)
+        backend = FakeBackend(["abc", "must-not-be-read"])
+        herdr = FakeHerdr(["w1:p2"] * 10)
+        herdr.panes = [{"pane_id": "w1:p1"}, {"pane_id": "w1:p2"}]
+        herdr.presence = {"w1:old": "absent"}
+
+        code = ime_keeper.handle_event(
+            "pane-focused",
+            self.env,
+            backend=backend,
+            herdr=herdr,
+            event={"event": "pane_focused", "data": {"pane_id": "w1:p2"}},
+            debounce_seconds=0,
+        )
+
+        snapshot, _ = ime_keeper.PaneRecords(store).snapshot()
+        self.assertEqual(code, 0)
+        self.assertEqual(backend.current_calls, 1)
+        self.assertEqual(backend.selected, ["target"])
+        self.assertNotIn("w1:old", snapshot["panes"])
+        self.assertIn("last_reconciled_at", snapshot)
+
+    def test_focus_arriving_during_maintenance_is_restored_before_focus_lock_releases(self):
+        self.write_config(default_action="keep")
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        state = ime_keeper.empty_state(context.identity)
+        state["last_focused_pane_id"] = "w1:p1"
+        state["panes"] = {
+            "w1:p1": {"input_source_id": "abc"},
+            "w1:p2": {"input_source_id": "target"},
+            "w1:p3": {"input_source_id": "third"},
+            "w1:old": {},
+        }
+        store.save(state)
+
+        class DirtyDuringPresenceHerdr(FakeHerdr):
+            def pane_presence_socket(inner_self, pane_id, timeout):
+                store.mark_dirty({"pane_id": "w1:p3"})
+                return "absent"
+
+        herdr = DirtyDuringPresenceHerdr(["w1:p2"] * 6 + ["w1:p3"] * 10)
+        herdr.panes = [
+            {"pane_id": "w1:p1"},
+            {"pane_id": "w1:p2"},
+            {"pane_id": "w1:p3"},
+        ]
+        backend = FakeBackend(["abc", "target"])
+
+        code = ime_keeper.handle_event(
+            "pane-focused",
+            self.env,
+            backend=backend,
+            herdr=herdr,
+            event={"event": "pane_focused", "data": {"pane_id": "w1:p2"}},
+            debounce_seconds=0,
+        )
+
+        snapshot, _ = ime_keeper.PaneRecords(store).snapshot()
+        self.assertEqual(code, 0)
+        self.assertEqual(backend.selected, ["target", "third"])
+        self.assertEqual(snapshot["last_focused_pane_id"], "w1:p3")
+        self.assertFalse(store.dirty_path.exists())
+
+    def test_unchanged_live_metadata_token_is_not_republished(self):
+        self.write_config(pane_status_on_focus=True, notify_on_focus=False)
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        herdr = FakeHerdr([])
+
+        ime_keeper.focus.publish_focus_status(
+            store,
+            context.config,
+            herdr,
+            "w1:p1",
+            "com.apple.keylayout.ABC",
+            "keep",
+            current_tokens={"ime": "ABC"},
+        )
+
+        self.assertEqual(herdr.pane_statuses, [])
+
     def test_focus_publication_failures_are_logged_without_failing_event(self):
         self.write_config(
             default_action="reset",
             default_input_source="com.apple.keylayout.ABC",
             debug=False,
+            notify_on_focus=True,
         )
         env = {
             **self.env,
@@ -686,6 +1024,7 @@ class EventHandlerTests(TempEnvTest):
         self.write_config(
             default_action="keep",
             default_input_source="com.apple.keylayout.ABC",
+            notify_on_focus=True,
         )
         context = ime_keeper.HerdrContext.from_env(self.env)
         store = ime_keeper.StateStore(self.state_dir, context.identity)
@@ -751,6 +1090,7 @@ class EventHandlerTests(TempEnvTest):
         self.write_config(
             default_action="keep",
             default_input_source="com.apple.keylayout.ABC",
+            notify_on_focus=True,
         )
         context = ime_keeper.HerdrContext.from_env(self.env)
         store = ime_keeper.StateStore(self.state_dir, context.identity)
@@ -830,7 +1170,10 @@ class EventHandlerTests(TempEnvTest):
 
         current_name = store.debug_current_path.read_text(encoding="utf-8").strip()
         log_path = store.session_dir / current_name
-        log_entry = json.loads(log_path.read_text(encoding="utf-8").splitlines()[-1])
+        entries = [
+            json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()
+        ]
+        log_entry = next(entry for entry in entries if entry["event"] == "pane-focused")
         self.assertEqual(log_entry["event"], "pane-focused")
         self.assertEqual(log_entry["mode"], "keep")
         self.assertEqual(log_entry["pane_id"], "w1:p2")
@@ -838,6 +1181,18 @@ class EventHandlerTests(TempEnvTest):
         self.assertEqual(log_entry["default_input_source"], "com.apple.keylayout.ABC")
         self.assertEqual(log_entry["target_input_source"], "com.apple.inputmethod.SCIM.ITABC")
         self.assertEqual(log_entry["stored_target_input_source"], "com.apple.inputmethod.SCIM.ITABC")
+        timing_entry = next(entry for entry in entries if entry["event"] == "focus-timings")
+        for field in (
+            "lock_wait_ms",
+            "stabilize_ms",
+            "backend_current_ms",
+            "backend_select_ms",
+            "metadata_ms",
+            "notification_ms",
+            "total_ms",
+            "coalesced_events",
+        ):
+            self.assertIn(field, timing_entry)
         self.assertEqual(log_entry["observed_previous_input_source"], "com.apple.keylayout.ABC")
         self.assertEqual(log_entry["backend_current_before_select"], "com.apple.keylayout.ABC")
         self.assertEqual(log_entry["select_action"], "selected")
@@ -928,6 +1283,31 @@ class CliTests(TempEnvTest):
         self.assertFalse(store.debug_path.exists())
         self.assertFalse(store.debug_current_path.exists())
         self.assertEqual(list(store.session_dir.glob("debug.*.log")), [])
+
+    def test_status_reports_read_only_pane_health(self):
+        self.write_config()
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        state = ime_keeper.empty_state(context.identity)
+        state["panes"] = {"w1:p1": {}, "w1:old": {}}
+        store.save(state)
+        before = store.state_path.read_bytes()
+        herdr = FakeHerdr([])
+        herdr.panes = [{"pane_id": "w1:p1"}, {"pane_id": "w1:new"}]
+        stdout = io.StringIO()
+
+        with contextlib.redirect_stdout(stdout):
+            code = ime_keeper.main(
+                ["status"], env=self.env, backend=FakeBackend(["abc"]), herdr=herdr
+            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["pane_health"]["live"], 2)
+        self.assertEqual(payload["pane_health"]["stored"], 2)
+        self.assertEqual(payload["pane_health"]["unmatched_ids"], ["w1:old"])
+        self.assertEqual(payload["pane_health"]["missing_ids"], ["w1:new"])
+        self.assertEqual(store.state_path.read_bytes(), before)
 
     def test_dashboard_once_renders_compact_pane_status(self):
         self.write_config(
@@ -1111,6 +1491,35 @@ class CliTests(TempEnvTest):
 
         self.assertEqual(code, 0)
         self.assertEqual(backend.selected, [])
+
+    def test_doctor_gc_all_forces_guarded_current_session_reconciliation(self):
+        self.write_config()
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        state = ime_keeper.empty_state(context.identity)
+        state["last_focused_pane_id"] = "w1:p1"
+        state["panes"] = {"w1:p1": {}, "w1:old": {}}
+        store.save(state)
+        herdr = FakeHerdr([])
+        herdr.panes = [{"pane_id": "w1:p1"}]
+        herdr.presence = {"w1:old": "absent"}
+        stdout = io.StringIO()
+
+        with contextlib.redirect_stdout(stdout):
+            code = ime_keeper.main(
+                ["doctor", "--gc-all"],
+                env=self.env,
+                backend=FakeBackend(["abc"]),
+                herdr=herdr,
+            )
+
+        payload = json.loads(stdout.getvalue())
+        snapshot, _ = ime_keeper.PaneRecords(store).snapshot()
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["reconciliation"]["pruned_ids"], ["w1:old"])
+        self.assertTrue(payload["reconciliation"]["completed"])
+        self.assertIn("last_reconciled_at", snapshot)
+        self.assertEqual(set(snapshot["panes"]), {"w1:p1"})
 
     def test_doctor_select_self_test_selects_current_input_source(self):
         self.write_config()
