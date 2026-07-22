@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -183,6 +184,15 @@ class HerdrClientTests(unittest.TestCase):
             self.assertIsNone(client.list_panes_socket(0.25))
             self.assertEqual(client.pane_presence_socket("w1:gone", 0.2), "absent")
             self.assertEqual(client.pane_presence_socket("w1:maybe", 0.1), "unknown")
+
+    def test_cli_pane_list_rejects_missing_or_invalid_result(self):
+        client = ime_keeper.HerdrClient({})
+        for response in ({}, {"result": {}}, {"result": {"panes": "invalid"}}):
+            with self.subTest(response=response), mock.patch.object(
+                client, "_run_herdr_json", return_value=response
+            ):
+                with self.assertRaisesRegex(RuntimeError, "invalid pane list"):
+                    client.list_panes()
 
 
 class SessionIdentityTests(TempEnvTest):
@@ -431,6 +441,25 @@ class PaneRecordsTests(TempEnvTest):
         self.assertEqual(set(snapshot["panes"]), {"w1:p1", "w1:old"})
         self.assertNotIn("last_reconciled_at", snapshot)
 
+    def test_automatic_reconciliation_does_not_repair_corrupt_state(self):
+        self.write_config()
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        store.session_dir.mkdir(parents=True, exist_ok=True)
+        corrupt = b"{not-json\n"
+        store.state_path.write_bytes(corrupt)
+        herdr = FakeHerdr([])
+        herdr.panes = [{"pane_id": "w1:p1"}]
+
+        result = ime_keeper.PaneRecords(store).reconcile_with_herdr(
+            herdr, budget_seconds=0.25
+        )
+
+        self.assertFalse(result.completed)
+        self.assertIn("state-update-failed", result.reason)
+        self.assertEqual(store.state_path.read_bytes(), corrupt)
+        self.assertEqual(list(store.session_dir.glob("state.json.broken.*")), [])
+
     def test_reconcile_budget_expiry_does_not_commit_partial_prunes(self):
         self.write_config()
         context = ime_keeper.HerdrContext.from_env(self.env)
@@ -662,6 +691,40 @@ class DebugLoggingTests(TempEnvTest):
         health = ime_keeper.log_health(store)
         self.assertEqual(health["focus"]["segments"], 3)
 
+    def test_concurrent_log_rotation_keeps_valid_files_and_pointer(self):
+        self.write_config(debug=True)
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        errors = []
+        original_focus_limit = ime_keeper.logs.FOCUS_LOG_MAX_BYTES
+        original_debug_limit = ime_keeper.logs.DEBUG_LOG_MAX_BYTES
+
+        def write_logs(index):
+            try:
+                ime_keeper.logs.append_focus_line(store, f"focus-{index}")
+                ime_keeper.log_debug(store, context.config, {"event": "thread", "index": index})
+            except Exception as exc:
+                errors.append(exc)
+
+        try:
+            ime_keeper.logs.FOCUS_LOG_MAX_BYTES = 1
+            ime_keeper.logs.DEBUG_LOG_MAX_BYTES = 1
+            threads = [threading.Thread(target=write_logs, args=(index,)) for index in range(12)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        finally:
+            ime_keeper.logs.FOCUS_LOG_MAX_BYTES = original_focus_limit
+            ime_keeper.logs.DEBUG_LOG_MAX_BYTES = original_debug_limit
+
+        self.assertEqual(errors, [])
+        self.assertTrue(store.focus_log_path.exists())
+        current_name = store.debug_current_path.read_text(encoding="utf-8").strip()
+        self.assertTrue((store.session_dir / current_name).exists())
+        self.assertLessEqual(len(list(store.session_dir.glob("focus.*.log"))), 2)
+        self.assertLessEqual(len(list(store.session_dir.glob("debug.*.log"))), 3)
+
     def test_debug_log_retention_keeps_current_pointer_and_three_segments(self):
         self.write_config(debug=True)
         context = ime_keeper.HerdrContext.from_env(self.env)
@@ -719,6 +782,49 @@ class EventParsingTests(unittest.TestCase):
 
 
 class EventHandlerTests(TempEnvTest):
+    def test_post_maintenance_check_never_skips_dirty_marker(self):
+        self.write_config()
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        store.mark_dirty({"pane_id": "w1:p2"})
+
+        self.assertTrue(
+            ime_keeper.focus.should_loop_again(store, FakeHerdr(["w1:p1"]), "w1:p1")
+        )
+
+    def test_stable_snapshot_uses_second_tokens_for_metadata_decision(self):
+        class SnapshotHerdr(FakeHerdr):
+            def __init__(inner_self):
+                super().__init__([])
+                inner_self.snapshots = [
+                    {"pane_id": "w1:p1", "tokens": {"ime": "ABC"}},
+                    {"pane_id": "w1:p1", "tokens": {}},
+                ]
+
+            def current_pane(inner_self):
+                if inner_self.snapshots:
+                    return inner_self.snapshots.pop(0)
+                return {"pane_id": "w1:p1", "tokens": {}}
+
+        herdr = SnapshotHerdr()
+        pane = ime_keeper.focus.stable_current_pane(herdr, 0)
+        self.assertEqual(pane.get("tokens"), {})
+
+    def test_automatic_reconciliation_fails_open_on_config_reload_error(self):
+        self.write_config(default_action="keep")
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        herdr = FakeHerdr([])
+
+        with mock.patch.object(
+            ime_keeper.focus, "load_config", side_effect=OSError("config unavailable")
+        ):
+            ime_keeper.focus.attempt_due_reconciliation(
+                context, store, herdr, context.config
+            )
+
+        self.assertEqual(herdr.reconcile_timeouts, [])
+
     def test_busy_run_lock_leaves_automatic_reconciliation_due_for_retry(self):
         self.write_config(default_action="keep")
         context = ime_keeper.HerdrContext.from_env(self.env)
@@ -786,6 +892,55 @@ class EventHandlerTests(TempEnvTest):
         self.assertEqual(backend.selected, ["target"])
         self.assertNotIn("w1:old", snapshot["panes"])
         self.assertIn("last_reconciled_at", snapshot)
+
+    def test_concurrent_focus_commit_waits_for_reconciliation_snapshot_commit(self):
+        self.write_config(default_action="keep")
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        state = ime_keeper.empty_state(context.identity)
+        state["last_focused_pane_id"] = "w1:p1"
+        state["panes"] = {"w1:p1": {}, "w1:old": {}}
+        store.save(state)
+        writer_started = threading.Event()
+        writer_finished = threading.Event()
+        writer_threads = []
+
+        class ConcurrentCommitHerdr(FakeHerdr):
+            def pane_presence_socket(inner_self, pane_id, timeout):
+                def commit_focus():
+                    writer_started.set()
+                    with ime_keeper.FileLock(
+                        ime_keeper.run_lock_path(self.state_dir), blocking=True
+                    ):
+                        records = ime_keeper.PaneRecords(store)
+                        memory = records.focus_memory("w1:new")
+                        records.commit_focus(
+                            memory,
+                            {"pane_id": "w1:new", "workspace_id": "w1"},
+                            observed_previous_source=None,
+                            selected_source="new-ime",
+                        )
+                    writer_finished.set()
+
+                thread = threading.Thread(target=commit_focus)
+                writer_threads.append(thread)
+                thread.start()
+                self.assertTrue(writer_started.wait(1))
+                self.assertFalse(writer_finished.is_set())
+                return "absent"
+
+        herdr = ConcurrentCommitHerdr([])
+        herdr.panes = [{"pane_id": "w1:p1"}]
+        ime_keeper.focus.attempt_due_reconciliation(
+            context, store, herdr, context.config
+        )
+        for thread in writer_threads:
+            thread.join(1)
+
+        snapshot, _ = ime_keeper.PaneRecords(store).snapshot()
+        self.assertTrue(writer_finished.is_set())
+        self.assertNotIn("w1:old", snapshot["panes"])
+        self.assertEqual(snapshot["panes"]["w1:new"]["input_source_id"], "new-ime")
 
     def test_focus_arriving_during_maintenance_is_restored_before_focus_lock_releases(self):
         self.write_config(default_action="keep")
@@ -1430,6 +1585,23 @@ class CliTests(TempEnvTest):
 
         self.assertEqual([tab.get("tab_id") for tab in data["tabs"]], ["w1:t1", "w2:t1"])
         self.assertEqual(herdr.list_tab_args, [None])
+
+    def test_dashboard_suppresses_health_for_invalid_pane_snapshot(self):
+        self.write_config()
+        context = ime_keeper.HerdrContext.from_env(self.env)
+        store = ime_keeper.StateStore(self.state_dir, context.identity)
+        state = ime_keeper.empty_state(context.identity)
+        state["panes"] = {"w1:p1": {}}
+        store.save(state)
+        before = store.state_path.read_bytes()
+        herdr = FakeHerdr([])
+        herdr.panes = [{"pane_id": "w1:p1"}, {}]
+
+        data = ime_keeper.collect_dashboard_data(self.env, FakeBackend(["abc"]), herdr)
+
+        self.assertIsNone(data["pane_health"])
+        self.assertIn("pane_list_invalid", data["diagnostics"])
+        self.assertEqual(store.state_path.read_bytes(), before)
 
     def test_set_backend_helper_and_macism_write_backend_config(self):
         self.write_config()

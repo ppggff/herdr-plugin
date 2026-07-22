@@ -184,7 +184,15 @@ def collect_dashboard_data(
             diagnostics.append(f"backend_current_failed: {exc}")
 
     workspaces = call_herdr_list(diagnostics, "workspace_list", herdr.list_workspaces)
+    pane_diag_start = len(diagnostics)
     panes = call_herdr_list(diagnostics, "pane_list", herdr.list_panes)
+    pane_snapshot_valid = len(diagnostics) == pane_diag_start
+    if pane_snapshot_valid and any(
+        not isinstance(pane.get("pane_id"), str) or not pane.get("pane_id")
+        for pane in panes
+    ):
+        diagnostics.append("pane_list_invalid")
+        pane_snapshot_valid = False
     tab_diag_start = len(diagnostics)
     tabs = call_herdr_list(diagnostics, "tab_list", herdr.list_tabs)
     if not tabs and len(diagnostics) > tab_diag_start and workspaces:
@@ -202,9 +210,11 @@ def collect_dashboard_data(
                     )
                 )
 
-    audit = PaneRecords(store).audit_live_panes(
-        [str(pane.get("pane_id")) for pane in panes if pane.get("pane_id")]
-    )
+    audit = None
+    if pane_snapshot_valid:
+        audit = PaneRecords(store).audit_live_panes(
+            [str(pane["pane_id"]) for pane in panes]
+        )
     backend_info = backend_status(config, backend)
     backend_info["healthy"] = current_input_source is not None
 
@@ -217,7 +227,7 @@ def collect_dashboard_data(
         "workspaces": workspaces,
         "tabs": tabs,
         "panes": panes,
-        "pane_health": dataclasses.asdict(audit),
+        "pane_health": dataclasses.asdict(audit) if audit is not None else None,
         "logs": log_health(store),
         "diagnostics": diagnostics,
     }
@@ -304,6 +314,7 @@ def render_dashboard(data: Mapping[str, Any], color_enabled: bool = False) -> st
         "health="
         f"backend:{'ok' if backend.get('healthy') else 'error'} "
         f"reconcile:{'due' if pane_health.get('maintenance_due', True) else 'ok'} "
+        f"last:{pane_health.get('last_reconciled_at') or 'never'} "
         f"focus-log:{focus_logs.get('bytes', 0)}B/{focus_logs.get('segments', 0)} "
         f"debug-log:{debug_logs.get('bytes', 0)}B/{debug_logs.get('segments', 0)}"
     )

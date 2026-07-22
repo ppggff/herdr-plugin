@@ -213,6 +213,13 @@ class PaneRecords:
             raise RecordsUnavailable(diagnostic or "state unavailable")
         return state
 
+    def _load_for_reconciliation(self) -> Dict[str, Any]:
+        state, diagnostic = self.store.load(readonly=True)
+        self.last_diagnostic = diagnostic
+        if state is None:
+            raise RecordsUnavailable(diagnostic or "state unavailable")
+        return state
+
     def snapshot(self) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         return self.store.load(readonly=True)
 
@@ -253,7 +260,7 @@ class PaneRecords:
         can_commit: Optional[Any] = None,
     ) -> ReconcileResult:
         live_ids = {str(pane_id) for pane_id in live_pane_ids if str(pane_id)}
-        state = self._load_for_update()
+        state = self._load_for_reconciliation()
         panes = state.setdefault("panes", {})
         focused_id = state.get("last_focused_pane_id")
         if not live_ids:
@@ -283,8 +290,13 @@ class PaneRecords:
             reason=None if completed else "pane-presence-unknown",
         )
 
-    def reconcile_with_herdr(self, herdr: Any, budget_seconds: float) -> ReconcileResult:
-        deadline = time.monotonic() + max(0.0, budget_seconds)
+    def reconcile_with_herdr(
+        self,
+        herdr: Any,
+        budget_seconds: float,
+        deadline: Optional[float] = None,
+    ) -> ReconcileResult:
+        deadline = deadline or (time.monotonic() + max(0.0, budget_seconds))
 
         def remaining() -> float:
             return max(0.0, deadline - time.monotonic())

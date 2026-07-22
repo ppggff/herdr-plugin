@@ -213,9 +213,16 @@ class HerdrClient:
         payload = self._run_herdr_json(args, timeout=2.0)
         result = payload.get("result")
         if not isinstance(result, dict):
-            return []
-        panes = result.get("panes", [])
-        return [item for item in panes if isinstance(item, dict)]
+            raise RuntimeError("herdr returned invalid pane list")
+        panes = result.get("panes")
+        if not isinstance(panes, list) or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("pane_id"), str)
+            or not item["pane_id"]
+            for item in panes
+        ):
+            raise RuntimeError("herdr returned invalid pane list")
+        return panes
 
     def show_notification(self, title: str, body: str) -> CommandResult:
         return self._socket_command(

@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
-from ._files import atomic_write_text, timestamp_for_filename
+from ._files import FileLock, atomic_write_text, timestamp_for_filename
 
 FOCUS_LOG_MAX_BYTES = 5 * 1024 * 1024
 DEBUG_LOG_MAX_BYTES = 10 * 1024 * 1024
@@ -32,21 +32,33 @@ def _would_overflow(path: Path, line: str, maximum: int) -> bool:
 
 def append_focus_line(store: Any, line: str) -> Optional[str]:
     try:
-        store.session_dir.mkdir(parents=True, exist_ok=True)
-        if _would_overflow(store.focus_log_path, line, FOCUS_LOG_MAX_BYTES):
-            rotated = store.session_dir / f"focus.{timestamp_for_filename()}.log"
-            store.focus_log_path.rename(rotated)
-        with store.focus_log_path.open("a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
-        rotated_paths = [
-            path
-            for path in store.session_dir.glob("focus.*.log")
-            if FOCUS_ROTATED_NAME_RE.fullmatch(path.name)
-        ]
-        _retained(rotated_paths, LOG_SEGMENTS - 1)
+        with FileLock(_log_lock_path(store), blocking=True):
+            store.session_dir.mkdir(parents=True, exist_ok=True)
+            if _would_overflow(store.focus_log_path, line, FOCUS_LOG_MAX_BYTES):
+                rotated = store.session_dir / f"focus.{timestamp_for_filename()}.log"
+                store.focus_log_path.rename(rotated)
+            with store.focus_log_path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+            rotated_paths = [
+                path
+                for path in store.session_dir.glob("focus.*.log")
+                if FOCUS_ROTATED_NAME_RE.fullmatch(path.name)
+            ]
+            _retained(rotated_paths, LOG_SEGMENTS - 1)
     except OSError as exc:
         return f"focus_log_failed: {exc}"
     return None
+
+
+def append_focus_fields(
+    store: Any, config: Mapping[str, Any], fields: Mapping[str, Optional[str]]
+) -> Optional[str]:
+    if not bool(config.get("focus_log", True)):
+        return None
+    parts = [_local_now()]
+    parts.extend(_focus_log_field(name, value) for name, value in fields.items())
+    parts.append(_focus_log_field("SESSION", store.identity.label))
+    return append_focus_line(store, " ".join(parts).rstrip())
 
 
 def timestamped_debug_log_path(store: Any) -> Path:
@@ -89,9 +101,11 @@ def resolve_debug_log_path(store: Any, next_line: str = "") -> Path:
     return current_path
 
 
-def log_debug(store: Any, config: Mapping[str, Any], message: Mapping[str, Any]) -> None:
+def log_debug(
+    store: Any, config: Mapping[str, Any], message: Mapping[str, Any]
+) -> Optional[str]:
     if not bool(config.get("debug", False)):
-        return
+        return None
     payload = {
         "timestamp": _utc_now(),
         "session_label": store.identity.label,
@@ -99,15 +113,20 @@ def log_debug(store: Any, config: Mapping[str, Any], message: Mapping[str, Any])
         **dict(message),
     }
     line = json.dumps(payload, ensure_ascii=False)
-    debug_path = resolve_debug_log_path(store, line)
-    with debug_path.open("a", encoding="utf-8") as handle:
-        handle.write(line + "\n")
-    debug_paths = [
-        path
-        for path in store.session_dir.glob("debug.*.log")
-        if DEBUG_LOG_NAME_RE.fullmatch(path.name)
-    ]
-    _retained(debug_paths, LOG_SEGMENTS)
+    try:
+        with FileLock(_log_lock_path(store), blocking=True):
+            debug_path = resolve_debug_log_path(store, line)
+            with debug_path.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+            debug_paths = [
+                path
+                for path in store.session_dir.glob("debug.*.log")
+                if DEBUG_LOG_NAME_RE.fullmatch(path.name)
+            ]
+            _retained(debug_paths, LOG_SEGMENTS)
+    except OSError as exc:
+        return f"debug_log_failed: {exc}"
+    return None
 
 
 def log_health(store: Any) -> Dict[str, Dict[str, int]]:
@@ -128,14 +147,33 @@ def log_health(store: Any) -> Dict[str, Dict[str, int]]:
 
 
 def _path_health(paths: list[Path]) -> Dict[str, int]:
-    existing = [path for path in paths if path.exists()]
+    sizes = []
+    for path in paths:
+        try:
+            sizes.append(path.stat().st_size)
+        except FileNotFoundError:
+            pass
     return {
-        "bytes": sum(path.stat().st_size for path in existing),
-        "segments": len(existing),
+        "bytes": sum(sizes),
+        "segments": len(sizes),
     }
+
+
+def _log_lock_path(store: Any) -> Path:
+    return store.session_dir / "logs.lock"
 
 
 def _utc_now() -> str:
     from datetime import datetime, timezone
 
     return datetime.now(timezone.utc).isoformat()
+
+
+def _local_now() -> str:
+    from datetime import datetime
+
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _focus_log_field(name: str, value: Optional[str]) -> str:
+    return f"{name}={str(value) if value else '-'}"

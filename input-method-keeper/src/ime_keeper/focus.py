@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 import time
-import dataclasses
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple
 
@@ -11,12 +11,11 @@ from ._files import FileLock, run_lock_path
 from .config import load_config
 from .herdr import pane_parts
 from .input_source import CommandResult, ensure_input_source_details, short_input_source
-from .logs import append_focus_line, log_debug
+from .logs import append_focus_fields, log_debug
 from .records import (
     PaneRecords,
     RecordsUnavailable,
     StateStore,
-    local_now_for_log,
     reconcile_state_policy,
 )
 
@@ -73,11 +72,6 @@ def pane_marker(pane_id: Optional[str]) -> str:
 
 def status_line(side: str, action: str, detail: str, pane_id: Optional[str]) -> str:
     return f"{side:<4} {action:<4}: {detail}{pane_marker(pane_id)}"
-
-
-def focus_log_field(name: str, value: Optional[str]) -> str:
-    text = str(value) if value else "-"
-    return f"{name}={text}"
 
 
 def source_transition(before: Optional[str], after: Optional[str]) -> str:
@@ -256,61 +250,6 @@ def current_focus_log_detail(
     return source_transition(backend_current_before_select, input_source_id)
 
 
-def focus_log_line(
-    store: StateStore,
-    pane_id: str,
-    input_source_id: Optional[str],
-    mode: str,
-    default_input_source: Optional[str],
-    stored_input_source: Optional[str],
-    previous_pane_id: Optional[str],
-    previous_stored_input_source: Optional[str],
-    previous_observed_input_source: Optional[str],
-    backend_current_before_select: Optional[str],
-    select_action: Optional[str],
-    reason: Optional[str],
-) -> str:
-    old_pane, old_workspace = pane_parts(previous_pane_id)
-    new_pane, new_workspace = pane_parts(pane_id)
-    old_action = previous_action_code(
-        previous_pane_id,
-        previous_stored_input_source,
-        previous_observed_input_source,
-    )
-    old_detail = previous_focus_log_detail(
-        previous_pane_id,
-        previous_stored_input_source,
-        previous_observed_input_source,
-    )
-    new_action = current_action_code(select_action, reason)
-    new_detail = current_focus_log_detail(
-        input_source_id,
-        backend_current_before_select,
-        select_action,
-        reason,
-    )
-    fields = [
-        local_now_for_log(),
-        focus_log_field("OLD", old_action),
-        focus_log_field("OLD_IME", old_detail),
-        focus_log_field("OLD_P", old_pane),
-        focus_log_field("OLD_W", old_workspace),
-        focus_log_field("NEW", new_action),
-        focus_log_field("NEW_IME", new_detail),
-        focus_log_field("NEW_P", new_pane),
-        focus_log_field("NEW_W", new_workspace),
-        focus_log_field("DEFAULT", short_input_source(default_input_source)),
-        focus_log_field("TARGET", short_input_source(input_source_id)),
-        focus_log_field("BEFORE", short_input_source(backend_current_before_select)),
-        focus_log_field("STORED", short_input_source(stored_input_source)),
-        focus_log_field("MODE", mode),
-        focus_log_field("ACTION", select_action),
-        focus_log_field("REASON", reason),
-        focus_log_field("SESSION", store.identity.label),
-    ]
-    return " ".join(fields).rstrip()
-
-
 def append_focus_log(
     store: StateStore,
     config: Mapping[str, Any],
@@ -326,28 +265,25 @@ def append_focus_log(
     select_action: Optional[str],
     reason: Optional[str],
 ) -> Optional[str]:
-    if not bool(config.get("focus_log", True)):
-        return None
-    try:
-        return append_focus_line(
-            store,
-            focus_log_line(
-                    store,
-                    pane_id,
-                    input_source_id,
-                    mode,
-                    default_input_source,
-                    stored_input_source,
-                    previous_pane_id,
-                    previous_stored_input_source,
-                    previous_observed_input_source,
-                    backend_current_before_select,
-                    select_action,
-                    reason,
-                ),
-        )
-    except OSError as exc:
-        return f"focus_log_failed: {exc}"
+    old_pane, old_workspace = pane_parts(previous_pane_id)
+    new_pane, new_workspace = pane_parts(pane_id)
+    return append_focus_fields(store, config, {
+        "OLD": previous_action_code(previous_pane_id, previous_stored_input_source, previous_observed_input_source),
+        "OLD_IME": previous_focus_log_detail(previous_pane_id, previous_stored_input_source, previous_observed_input_source),
+        "OLD_P": old_pane,
+        "OLD_W": old_workspace,
+        "NEW": current_action_code(select_action, reason),
+        "NEW_IME": current_focus_log_detail(input_source_id, backend_current_before_select, select_action, reason),
+        "NEW_P": new_pane,
+        "NEW_W": new_workspace,
+        "DEFAULT": short_input_source(default_input_source),
+        "TARGET": short_input_source(input_source_id),
+        "BEFORE": short_input_source(backend_current_before_select),
+        "STORED": short_input_source(stored_input_source),
+        "MODE": mode,
+        "ACTION": select_action,
+        "REASON": reason,
+    })
 
 
 def publish_focus_status(
@@ -470,9 +406,7 @@ def stable_current_pane(herdr: Any, debounce_seconds: float) -> Optional[Dict[st
     second = herdr.current_pane()
     if not second:
         return None
-    if second.get("pane_id") != first.get("pane_id"):
-        return second
-    return first
+    return second
 
 
 def handle_pane_focused(
@@ -507,7 +441,6 @@ def handle_pane_focused(
             if mode in {"disabled", "ignore"}:
                 store.clear_dirty()
                 return 0
-        deadline = time.monotonic() + 1.0
         while True:
             stabilize_started = time.monotonic()
             pane = stable_current_pane(herdr, debounce_seconds)
@@ -603,7 +536,7 @@ def handle_pane_focused(
                     timings["backend_current_ms"] += float(ensure_result.get("current_ms", 0.0))
                     timings["backend_select_ms"] += float(ensure_result.get("select_ms", 0.0))
                     log_focus_timings(store, config, str(stable_pane_id), timings, focus_started)
-                    if should_loop_again(store, herdr, stable_pane_id, deadline):
+                    if should_loop_again(store, herdr, stable_pane_id):
                         timings["coalesced_events"] += 1
                         continue
                     return 0
@@ -655,11 +588,11 @@ def handle_pane_focused(
                     )
                     timings.update(publication_ms)
                     log_focus_timings(store, config, str(stable_pane_id), timings, focus_started)
-                    if should_loop_again(store, herdr, stable_pane_id, deadline):
+                    if should_loop_again(store, herdr, stable_pane_id):
                         timings["coalesced_events"] += 1
                         continue
                     attempt_due_reconciliation(context, store, herdr, config)
-                    if should_loop_again(store, herdr, stable_pane_id, deadline):
+                    if should_loop_again(store, herdr, stable_pane_id):
                         continue
                     return 0
                 previous_pane_id = memory.previous_pane_id
@@ -805,18 +738,16 @@ def handle_pane_focused(
                 timings["backend_current_ms"] += float(ensure_result.get("current_ms", 0.0))
                 timings["backend_select_ms"] += float(ensure_result.get("select_ms", 0.0))
                 log_focus_timings(store, config, str(stable_pane_id), timings, focus_started)
-                if should_loop_again(store, herdr, stable_pane_id, deadline):
+                if should_loop_again(store, herdr, stable_pane_id):
                     timings["coalesced_events"] += 1
                     continue
                 attempt_due_reconciliation(context, store, herdr, config)
-                if should_loop_again(store, herdr, stable_pane_id, deadline):
+                if should_loop_again(store, herdr, stable_pane_id):
                     continue
                 return 0
 
 
-def should_loop_again(store: StateStore, herdr: Any, stable_pane_id: str, deadline: float) -> bool:
-    if time.monotonic() >= deadline:
-        return False
+def should_loop_again(store: StateStore, herdr: Any, stable_pane_id: str) -> bool:
     dirty = store.read_dirty_mtime() is not None
     pane = herdr.current_pane()
     changed = bool(pane and pane.get("pane_id") != stable_pane_id)
@@ -829,16 +760,33 @@ def attempt_due_reconciliation(
     herdr: Any,
     config: Mapping[str, Any],
 ) -> None:
+    maintenance_deadline = time.monotonic() + 0.25
     records = PaneRecords(store)
     if not records.audit_live_panes([]).maintenance_due:
         return
-    with FileLock(run_lock_path(context.state_dir), blocking=False) as maintenance_lock:
-        if not maintenance_lock.acquired:
-            return
-        latest_config = load_config(context.config_dir, readonly=True)
-        if reconcile_state_policy(latest_config, store, "automatic-reconciliation") != "keep":
-            return
-        result = records.reconcile_with_herdr(herdr, budget_seconds=0.25)
+    latest_config = config
+    try:
+        with FileLock(run_lock_path(context.state_dir), blocking=False) as maintenance_lock:
+            if not maintenance_lock.acquired:
+                return
+            latest_config = load_config(context.config_dir, readonly=True)
+            if reconcile_state_policy(latest_config, store, "automatic-reconciliation") != "keep":
+                return
+            remaining = maintenance_deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            result = records.reconcile_with_herdr(
+                herdr,
+                budget_seconds=remaining,
+                deadline=maintenance_deadline,
+            )
+    except Exception as exc:
+        log_debug(
+            store,
+            latest_config,
+            {"event": "pane-reconciliation", "completed": False, "reason": f"maintenance-failed: {exc}"},
+        )
+        return
     log_debug(
         store,
         latest_config,
