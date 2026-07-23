@@ -21,9 +21,9 @@ Version 0.3 adds quiet defaults, lower focus-path overhead, bounded logs, and
 guarded automatic current-session pane-memory maintenance. See
 [V0.3.md](V0.3.md) for its invariants and validation evidence.
 
-Version 0.4 is proposed, not implemented. Its design adds a compact settings
-popup while preserving the dashboard, automatic focus behavior, config/state
-formats, and existing action ids. See [V0.4.md](V0.4.md).
+Version 0.4 adds a compact settings popup while preserving the dashboard,
+automatic focus behavior, config/state formats, and existing action ids. See
+[V0.4.md](V0.4.md) for its interaction and concurrency invariants.
 
 ## Requirements
 
@@ -152,6 +152,21 @@ herdr plugin action invoke set-default-action-keep --plugin ppggff.input-method-
 herdr plugin action invoke debug-on --plugin ppggff.input-method-keeper
 ```
 
+For occasional human configuration, open the recommended compact settings
+popup instead of remembering action names:
+
+```sh
+herdr plugin pane open \
+  --plugin ppggff.input-method-keeper \
+  --entrypoint settings
+```
+
+Use Up/Down or `j`/`k` to move, Enter to change or confirm, Left/Right to choose
+an enum value, `r` to refresh, and `q` or Esc to close. Opening, navigating,
+refreshing, cancelling, and closing are read-only. A change that would clear
+pane memory or repair invalid config shows its exact effects before Enter can
+confirm it.
+
 For GitHub installs, the helper is already compiled and verified. For local
 links, it compiles the first time it is used. If `swiftc` is not installed,
 switch to `macism` or install Xcode Command Line Tools.
@@ -219,6 +234,10 @@ herdr plugin action invoke <action-id> --plugin ppggff.input-method-keeper
 | `doctor` | Run repair-capable diagnostics. |
 | `doctor-gc-all` | Run diagnostics and remove old non-current session state. |
 
+These action ids remain the stable scripting and compatibility surface. The
+settings popup is the recommended human-facing surface and deliberately exposes
+only Enabled, Default action, Default source, Backend, and Debug logging.
+
 ## Keybindings
 
 The plugin does not register default keybindings. The manifest only registers
@@ -278,6 +297,23 @@ muted color as the timestamp.
 
 The dashboard pane is not special-cased by the plugin. It is handled like any
 other Herdr pane, so it can also get its own remembered input source.
+
+## Settings Popup
+
+Open the session-modal popup with:
+
+```sh
+herdr plugin pane open --plugin ppggff.input-method-keeper --entrypoint settings
+```
+
+Unlike the dashboard split, the popup does not become a tiled Herdr pane and
+does not acquire pane memory. It refreshes only when opened, after an operation,
+or when `r` is pressed. For deterministic diagnostics and tests, render one
+plain read-only snapshot with:
+
+```sh
+input-method-keeper/bin/ime-keeper settings --once
+```
 
 ## Config
 

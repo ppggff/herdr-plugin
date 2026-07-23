@@ -24,9 +24,11 @@ from .input_source import (
     ensure_input_source_details,
 )
 from .logs import DEBUG_LOG_MAX_BYTES, FOCUS_LOG_MAX_BYTES, log_debug, log_health
+from .mutations import ConfirmationToken, MutationResult, MutationService
 from .records import (
     PaneRecords,
     PaneAudit,
+    RecordPresence,
     ReconcileResult,
     SessionIdentity,
     StateStore,
@@ -34,10 +36,12 @@ from .records import (
     reconcile_state_policy,
     session_identity,
 )
+from .settings import SettingsController, render_settings, run_settings
 
 __all__ = [
     "BackendExecutor",
     "CommandResult",
+    "ConfirmationToken",
     "ConfigError",
     "DEBUG_LOG_MAX_BYTES",
     "FOCUS_LOG_MAX_BYTES",
@@ -45,11 +49,15 @@ __all__ = [
     "FileLock",
     "HerdrClient",
     "HerdrContext",
+    "MutationResult",
+    "MutationService",
     "PaneRecords",
     "PaneAudit",
     "ReconcileResult",
+    "RecordPresence",
     "SessionIdentity",
     "StateStore",
+    "SettingsController",
     "VALID_ACTIONS",
     "collect_dashboard_data",
     "apply_config_mutation",
@@ -71,7 +79,9 @@ __all__ = [
     "print_status",
     "reconcile_state_policy",
     "render_dashboard",
+    "render_settings",
     "run_dashboard",
+    "run_settings",
     "run_lock_path",
     "session_identity",
     "write_config",

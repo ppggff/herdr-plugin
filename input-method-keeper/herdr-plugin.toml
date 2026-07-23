@@ -1,6 +1,6 @@
 id = "ppggff.input-method-keeper"
 name = "Input Method Keeper"
-version = "0.3.0"
+version = "0.4.0"
 min_herdr_version = "0.7.4"
 description = "Keep macOS input sources stable per Herdr pane."
 platforms = ["macos"]
@@ -14,6 +14,14 @@ id = "dashboard"
 title = "Input method keeper dashboard"
 placement = "split"
 command = ["sh", "bin/ime-keeper", "dashboard"]
+
+[[panes]]
+id = "settings"
+title = "Input method keeper settings"
+placement = "popup"
+width = "80%"
+height = 22
+command = ["sh", "bin/ime-keeper", "settings"]
 
 [[actions]]
 id = "toggle-enabled"

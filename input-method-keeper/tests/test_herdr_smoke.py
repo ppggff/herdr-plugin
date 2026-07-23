@@ -674,6 +674,15 @@ class ManifestCoverageTests(unittest.TestCase):
 
         self.assertEqual(manifest["min_herdr_version"], "0.7.4")
 
+    def test_v04_settings_uses_session_modal_popup(self):
+        manifest = tomllib.loads((ROOT / "herdr-plugin.toml").read_text(encoding="utf-8"))
+        settings = next(pane for pane in manifest["panes"] if pane["id"] == "settings")
+
+        self.assertEqual(manifest["version"], "0.4.0")
+        self.assertEqual(settings["placement"], "popup")
+        self.assertEqual(settings["height"], 22)
+        self.assertEqual(settings["command"], ["sh", "bin/ime-keeper", "settings"])
+
 
 if __name__ == "__main__":
     unittest.main()

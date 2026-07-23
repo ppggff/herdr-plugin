@@ -79,6 +79,8 @@ Herdr event/action
               -> records        authoritative pane memory and cleanup/move events
               -> config         config defaults, validation, and mutation semantics
               -> dashboard      read-only live/stored record view
+              -> settings       compact keyboard UI and terminal lifecycle
+              -> mutations      confirmed config operations and record side effects
               -> herdr          Herdr queries and UI side effects
               -> input_source   current/select backend adapter
                   -> bundled helper when available; macism fallback
@@ -97,17 +99,18 @@ Cleanup and move events call record operations instead of editing the state
 dictionary themselves. `dashboard` and `status` use read-only snapshots.
 
 The dependency direction stays shallow: `cli` dispatches to feature modules;
-`focus` and `dashboard` use `config`, `records`, and the real adapters; `config`
-and `records` use `_files`. There is deliberately no plan/result hierarchy or
-general workflow engine—the focus procedure remains one explicit coordinator
-because its repeated Herdr reads and lock ordering are part of its correctness.
+`focus`, `dashboard`, `settings`, and `mutations` use `config`, `records`, and
+the real adapters; `config` and `records` use `_files`. There is deliberately no
+plan/result hierarchy or general workflow engine—the focus procedure remains
+one explicit coordinator because its repeated Herdr reads and lock ordering are
+part of its correctness.
 
 The Python code should stay dependency-light and use standard library modules:
 
 - `json` for config and state
 - `pathlib` for paths
 - `subprocess` for the configured backend executor and Herdr CLI calls
-- `fcntl` for the run and focus file locks on macOS
+- `fcntl` for the run, focus, and dirty-marker file locks on macOS
 - `logging` or a small append-only logger for debug logs
 
 ## Wrapper
@@ -337,10 +340,11 @@ This directory is per plugin id, not per Herdr session. In Herdr's current code,
 `HERDR_PLUGIN_STATE_DIR` is `state_dir()/plugins/<plugin-id>`. The plugin must
 therefore create its own per-session state files below that directory.
 
-The plugin uses two lock levels:
+The plugin uses three lock levels:
 
 - `HERDR_PLUGIN_STATE_DIR/run.lock`
 - `HERDR_PLUGIN_STATE_DIR/sessions/<session-key>/focus.lock`
+- `HERDR_PLUGIN_STATE_DIR/sessions/<session-key>/dirty.lock`
 
 `run.lock` is global to the plugin. Any code path that writes config, mutates
 `state.json`, calls the backend, or performs a real input-source decision must
@@ -350,9 +354,15 @@ at the same time should be serialized.
 
 `focus.lock` is session-scoped and used only by `pane.focused`. A focus event
 tries to acquire this lock without blocking. If it cannot acquire it, another
-focus worker is already active for that Herdr session; the new event writes
-`focus.dirty` for that session and exits immediately. This prevents a focus
-storm from filling Herdr's plugin command in-flight limit.
+focus worker is already active for that Herdr session; the losing event writes
+`focus.dirty` and exits immediately. This prevents a focus storm from filling
+Herdr's plugin command in-flight limit.
+
+`dirty.lock` is session-scoped and serializes `focus.dirty` creation and clear.
+Code may acquire it while holding `run.lock`, but no path may acquire
+`run.lock` or `focus.lock` while already holding `dirty.lock`. Confirmed settings
+changes retain this guard from dirty-fingerprint validation through any final
+state/marker clear.
 
 Actions, `pane.closed`, `tab.closed`, `pane.moved`, and `workspace.closed` do not
 use `focus.lock`; they acquire `run.lock` in blocking mode because they are
@@ -801,10 +811,11 @@ doctor-gc-all
 
 Action behavior:
 
-- Mutating actions acquire `run.lock`, load config, and run
-  `reconcile_state_policy` before doing action-specific work. Actions that write
-  config run `reconcile_state_policy` again after saving the new config. This is
-  idempotent and keeps manual `config.json` edits from reviving old pane memory.
+- Mutating actions delegate to `MutationService`, which acquires `run.lock`,
+  applies the finite `apply_config_mutation` operation, writes config atomically,
+  and clears current-session state when either the old or new policy requires
+  it. The settings popup calls the same seam with preview/confirmation enabled;
+  action commands retain their noninteractive v0.3 behavior.
 - `toggle-enabled`: read `enabled` from `config.json`, write the opposite value,
   and clear the current Herdr session's state before returning.
 - `status`: print config, user-facing session name, internal session key,
@@ -919,12 +930,12 @@ rendered as diagnostics, not treated as fatal. The dashboard pane is deliberatel
 not ignored by focus handling; it is just another Herdr pane and can have its
 own remembered input source.
 
-## Draft Manifest
+## Manifest
 
 ```toml
 id = "ppggff.input-method-keeper"
 name = "Input Method Keeper"
-version = "0.3.0"
+version = "0.4.0"
 min_herdr_version = "0.7.4"
 description = "Keep macOS input sources stable per Herdr pane."
 platforms = ["macos"]
@@ -938,6 +949,14 @@ id = "dashboard"
 title = "Input method keeper dashboard"
 placement = "split"
 command = ["sh", "bin/ime-keeper", "dashboard"]
+
+[[panes]]
+id = "settings"
+title = "Input method keeper settings"
+placement = "popup"
+width = "80%"
+height = 22
+command = ["sh", "bin/ime-keeper", "settings"]
 
 [[actions]]
 id = "toggle-enabled"
@@ -1264,10 +1283,10 @@ Keep the detailed behavior and acceptance criteria in `V0.3.md` rather than
 duplicating them here. The implementation now follows those v0.3 ownership and
 safety boundaries.
 
-## Proposed v0.4
+## v0.4
 
-The canonical v0.4 design is [V0.4.md](V0.4.md): **one compact control surface,
-no new policy system**. It is proposed and has not been implemented.
+The implemented v0.4 design is [V0.4.md](V0.4.md): **one compact control surface,
+no new policy system**. Manual release evidence remains a publishing precondition.
 
 The design adds a session-modal `settings` popup for enabled state, default
 action, default input source, backend, and debug logging. It keeps the dashboard

@@ -8,7 +8,7 @@ source memory.
 - Remembers the macOS input source used by each Herdr pane.
 - Restores a pane's remembered input source when focus returns to that pane.
 - Supports one global fallback input source and one global default action.
-- Provides status, diagnostics, and an optional live dashboard pane.
+- Provides a compact settings popup, status, diagnostics, and an optional live dashboard pane.
 
 ## Get Started
 
@@ -25,8 +25,9 @@ upgrade, quick start, configuration, testing, and troubleshooting.
 Version 0.3 makes the plugin quiet, fast, and self-maintaining without adding a
 rule engine or daemon. See the [v0.3 design and release evidence](input-method-keeper/V0.3.md).
 
-Version 0.4 is a proposed compact settings popup; it is not implemented yet.
-See the [v0.4 design](input-method-keeper/V0.4.md).
+Version 0.4 adds a compact keyboard-driven settings popup backed by the same
+mutation semantics as the existing actions. See the
+[v0.4 design](input-method-keeper/V0.4.md).
 
 See the [v0.3.0 release](https://github.com/ppggff/herdr-plugin/releases/tag/v0.3.0)
 for highlights and validation details.

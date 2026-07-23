@@ -22,6 +22,7 @@ from .focus import handle_pane_focused
 from .herdr import HerdrClient
 from .input_source import BackendExecutor, CommandResult
 from .logs import log_health
+from .mutations import MutationService
 from .records import (
     PaneRecords,
     RecordsUnavailable,
@@ -33,6 +34,7 @@ from .records import (
     reconcile_state_policy,
     session_identity,
 )
+from .settings import run_settings
 
 @dataclasses.dataclass(frozen=True)
 class HerdrContext:
@@ -309,27 +311,11 @@ def doctor(
 
 
 def mutate_config(env: Mapping[str, str], mutation: str, value: Optional[str], backend: Any) -> int:
-    actual_env = dict(env)
-    config_dir = Path(actual_env.get("HERDR_PLUGIN_CONFIG_DIR", "."))
-    state_dir = Path(actual_env.get("HERDR_PLUGIN_STATE_DIR", "."))
-    with FileLock(run_lock_path(state_dir), blocking=True):
-        config = ensure_config(config_dir)
-        identity = session_identity(config, actual_env)
-        store = StateStore(state_dir, identity)
-        current_input_source = backend.current() if mutation == "set-default-input-source" else None
-        try:
-            config, clear_records = apply_config_mutation(
-                config,
-                mutation,
-                value=value,
-                current_input_source=current_input_source,
-            )
-        except ConfigError as exc:
-            print(str(exc), file=sys.stderr)
-            return 2
-        write_config(config_dir, config)
-        if clear_records:
-            PaneRecords(store).clear()
+    try:
+        MutationService(env).apply(mutation, value=value, backend=backend, interactive=False)
+    except ConfigError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
     return 0
 
 
@@ -346,6 +332,7 @@ def main(
         config_for_backend = load_config(Path(actual_env.get("HERDR_PLUGIN_CONFIG_DIR", ".")), readonly=True)
     except ConfigError:
         pass
+    injected_backend = backend
     backend = backend if backend is not None else BackendExecutor(config_for_backend)
     if not argv:
         print("usage: ime-keeper <command>", file=sys.stderr)
@@ -392,6 +379,30 @@ def main(
             backend=backend,
             herdr=herdr,
             interval_seconds=interval_seconds,
+            once=once,
+            color_mode=color_mode,
+        )
+    if command == "settings":
+        once = False
+        color_mode = "auto"
+        index = 1
+        while index < len(argv):
+            if argv[index] == "--once":
+                once = True
+                index += 1
+            elif argv[index] == "--color" and index + 1 < len(argv):
+                color_mode = argv[index + 1]
+                if color_mode not in {"auto", "always", "never"}:
+                    print("settings color must be auto, always, or never", file=sys.stderr)
+                    return 2
+                index += 2
+            else:
+                print(f"unknown settings option: {argv[index]}", file=sys.stderr)
+                return 2
+        return run_settings(
+            actual_env,
+            backend=injected_backend,
+            herdr=herdr,
             once=once,
             color_mode=color_mode,
         )

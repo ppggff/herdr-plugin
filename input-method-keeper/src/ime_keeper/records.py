@@ -98,6 +98,7 @@ class StateStore:
         self.debug_path = self.session_dir / "debug.log"
         self.debug_current_path = self.session_dir / "debug.current"
         self.focus_lock_path = self.session_dir / "focus.lock"
+        self.dirty_lock_path = self.session_dir / "dirty.lock"
 
     def load(self, readonly: bool = True) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         if not self.state_path.exists():
@@ -147,16 +148,26 @@ class StateStore:
         data["last_seen_at"] = utc_now()
         atomic_write_json(self.state_path, data)
 
-    def clear(self) -> None:
+    def dirty_guard(self) -> "DirtyGuard":
+        return DirtyGuard(self)
+
+    def clear_locked(self, guard: "DirtyGuard") -> None:
+        if guard.store is not self or not guard.acquired:
+            raise RuntimeError("dirty guard does not own this state store")
         with contextlib_suppress_file_not_found():
             self.state_path.unlink()
         with contextlib_suppress_file_not_found():
             self.dirty_path.unlink()
 
+    def clear(self) -> None:
+        with self.dirty_guard() as guard:
+            self.clear_locked(guard)
+
     def mark_dirty(self, payload: Mapping[str, Any]) -> None:
         data = dict(payload)
         data["marked_at"] = utc_now()
-        atomic_write_json(self.dirty_path, data)
+        with self.dirty_guard():
+            atomic_write_json(self.dirty_path, data)
 
     def read_dirty_mtime(self) -> Optional[float]:
         try:
@@ -165,8 +176,29 @@ class StateStore:
             return None
 
     def clear_dirty(self) -> None:
-        with contextlib_suppress_file_not_found():
-            self.dirty_path.unlink()
+        with self.dirty_guard():
+            with contextlib_suppress_file_not_found():
+                self.dirty_path.unlink()
+
+
+class DirtyGuard:
+    """Opaque ownership token for one session's dirty marker lock."""
+
+    def __init__(self, store: StateStore):
+        self.store = store
+        self._lock = FileLock(store.dirty_lock_path, blocking=True)
+        self.acquired = False
+
+    def __enter__(self) -> "DirtyGuard":
+        self._lock.__enter__()
+        self.acquired = self._lock.acquired
+        if not self.acquired:
+            raise RuntimeError("failed to acquire dirty marker lock")
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.acquired = False
+        return self._lock.__exit__(exc_type, exc, tb)
 
 
 class RecordsUnavailable(RuntimeError):
@@ -199,6 +231,12 @@ class ReconcileResult:
     reason: Optional[str] = None
 
 
+@dataclasses.dataclass(frozen=True)
+class RecordPresence:
+    count: Optional[int]
+    unknown: bool
+
+
 class PaneRecords:
     """Own pane-memory reads and atomic record updates for one Herdr session."""
 
@@ -222,6 +260,15 @@ class PaneRecords:
 
     def snapshot(self) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
         return self.store.load(readonly=True)
+
+    def record_presence(self) -> RecordPresence:
+        state, diagnostic = self.snapshot()
+        if diagnostic or not isinstance(state, dict):
+            return RecordPresence(None, True)
+        panes = state.get("panes")
+        if not isinstance(panes, dict):
+            return RecordPresence(None, True)
+        return RecordPresence(len(panes), False)
 
     def clear(self) -> None:
         self.store.clear()
