@@ -21,6 +21,10 @@ Version 0.3 adds quiet defaults, lower focus-path overhead, bounded logs, and
 guarded automatic current-session pane-memory maintenance. See
 [V0.3.md](V0.3.md) for its invariants and validation evidence.
 
+Version 0.4 is proposed, not implemented. Its design adds a compact settings
+popup while preserving the dashboard, automatic focus behavior, config/state
+formats, and existing action ids. See [V0.4.md](V0.4.md).
+
 ## Requirements
 
 Required:

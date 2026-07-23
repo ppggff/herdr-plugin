@@ -25,6 +25,9 @@ upgrade, quick start, configuration, testing, and troubleshooting.
 Version 0.3 makes the plugin quiet, fast, and self-maintaining without adding a
 rule engine or daemon. See the [v0.3 design and release evidence](input-method-keeper/V0.3.md).
 
+Version 0.4 is a proposed compact settings popup; it is not implemented yet.
+See the [v0.4 design](input-method-keeper/V0.4.md).
+
 See the [v0.3.0 release](https://github.com/ppggff/herdr-plugin/releases/tag/v0.3.0)
 for highlights and validation details.
 

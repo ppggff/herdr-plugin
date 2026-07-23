@@ -1264,19 +1264,20 @@ Keep the detailed behavior and acceptance criteria in `V0.3.md` rather than
 duplicating them here. The implementation now follows those v0.3 ownership and
 safety boundaries.
 
-## Future Ideas
+## Proposed v0.4
 
-- A simple TUI settings pane could build on the dashboard once the current
-  behavior has been used for a while. Keep it as a settings and explicit-action
-  surface, not a replacement for the automatic focus handler.
-- Candidate TUI operations: toggle debug, switch backend, set default input
-  source, set default action, inspect/focus a pane, and possibly reset selected
-  pane state.
-- Keep the compact read-only dashboard as the low-risk default. Avoid adding a
-  heavy dependency or reviving the rule engine just to support the TUI.
-- If the TUI can focus another pane, expect the settings pane to lose keyboard
-  focus after that operation. That behavior is acceptable and should be designed
-  deliberately.
+The canonical v0.4 design is [V0.4.md](V0.4.md): **one compact control surface,
+no new policy system**. It is proposed and has not been implemented.
+
+The design adds a session-modal `settings` popup for enabled state, default
+action, default input source, backend, and debug logging. It keeps the dashboard
+read-only, keeps existing actions as compatibility/automation interfaces, and
+reuses the current config mutation and pane-memory clearing semantics.
+
+Pane focusing, selected-pane reset, arbitrary config editing, doctor/GC,
+continuous log viewing, and rule-based settings remain outside v0.4. Keep the
+detailed interaction, ownership, delivery, compatibility, and acceptance rules
+in `V0.4.md` rather than duplicating them here.
 
 ## Original Implementation Order
 
