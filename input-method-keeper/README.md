@@ -7,14 +7,14 @@ panes, for example English in one pane and Chinese Pinyin in another. It listens
 for Herdr pane focus events, remembers the input source for each pane, and
 restores it when you return to that pane.
 
-Version 1 is intentionally small:
+The plugin is intentionally small:
 
 - macOS only
 - Python 3.9+ runtime
 - two backend choices: bundled Swift helper or `macism`
 - one global default input source
 - one global default action: `keep`, `reset`, or `ignore`
-- no rule engine yet
+- no rule engine or long-running daemon
 
 For design and development details, see [DEVELOPMENT.md](DEVELOPMENT.md).
 Version 0.3 adds quiet defaults, lower focus-path overhead, bounded logs, and
@@ -158,14 +158,23 @@ Optional live dashboard:
 herdr plugin pane open --plugin ppggff.input-method-keeper --entrypoint dashboard
 ```
 
-Typical manual check:
+## Everyday Workflow
 
-1. Focus pane A and switch to input source A.
-2. Focus pane B and switch to input source B.
-3. Focus pane A again.
-4. Pane A should return to input source A.
-5. Focus pane B again.
-6. Pane B should return to input source B.
+After the one-time setup, there is no action to run during normal pane changes.
+For example:
+
+1. Work in pane A with `ABC` selected.
+2. Move to pane B. The plugin records the source observed for pane A and uses
+   the configured default for pane B until pane B has its own memory.
+3. Select Pinyin in pane B and continue working.
+4. Return to pane A. The plugin records Pinyin for pane B and restores `ABC` for
+   pane A.
+5. Return to pane B. The plugin restores Pinyin.
+
+Pane close, move, tab close, and workspace close events maintain current-session
+memory, and v0.3 also reconciles it automatically. The same A/B cycle is the
+one-time manual verification: each pane should recover its own source without a
+cleanup or restore command.
 
 ## Default Actions
 
@@ -604,7 +613,7 @@ input-method-keeper/scripts/herdr_smoke.py --link --full-ime
   behavior by observing and restoring the host input source.
 - `pane.focused` does not provide the previous pane or old input source.
 - If the user changes input source in another app and returns to Herdr without a
-  pane focus event, version 1 may not restore immediately.
+  pane focus event, the plugin may not restore immediately.
 - If macOS itself restores an app-specific input source before the event hook
   runs, the plugin may attribute that observed input source to the previous
   pane.
@@ -614,14 +623,17 @@ input-method-keeper/scripts/herdr_smoke.py --link --full-ime
   Shift hotkey still toggles Chinese/English until focus moves to another app
   and back. This appears to need an input-context refresh, not just a longer
   wait. The Swift helper backend with `--refresh` has manually fixed this
-  symptom in Herdr; the limitation remains for the default `macism` backend.
-- Version 1 has no rule engine and no ignore list.
+  symptom in Herdr; the limitation remains for the `macism` backend.
+- The plugin has no per-workspace, project, agent, or cwd rule engine and no
+  per-pane ignore list. Use global `ignore` mode or disable the plugin to pause
+  it.
 - Current-session pane records normally follow `pane.closed`, `tab.closed`,
   `pane.moved`, and `workspace.closed`. Version 0.3 also performs guarded
   reconciliation at most once per 24 hours; ambiguous list/get evidence is
   retained rather than deleted.
-- Stale non-current session directories are removed only by `doctor-gc-all` /
-  `doctor --gc-all`, or by a future Herdr session lifecycle event.
+- The plugin does not infer when a whole Herdr session has permanently closed.
+  Old non-current session directories are removed by `doctor-gc-all` / `doctor
+  --gc-all` after the configured age threshold.
 
 Routine current-session cleanup is automatic. `doctor --gc-all` remains the
 forced reconciliation and old-session recovery path, not a normal usage

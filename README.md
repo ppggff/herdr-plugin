@@ -28,4 +28,5 @@ rule engine or daemon. See the [v0.3 design and release evidence](input-method-k
 See the [v0.3.0 release](https://github.com/ppggff/herdr-plugin/releases/tag/v0.3.0)
 for highlights and validation details.
 
-For the GitHub publishing checklist, see [PUBLISHING.md](PUBLISHING.md).
+For the GitHub publishing and post-release verification checklist, see
+[PUBLISHING.md](PUBLISHING.md).

@@ -6,11 +6,11 @@ start with [README.md](README.md).
 
 Keep a stable macOS input source per Herdr pane.
 
-Version 1 is intentionally small:
+The plugin is intentionally small:
 
 - macOS only
 - Python 3 plugin logic
-- `macism` as the default input-source backend
+- bundled Swift helper when available, with `macism` as the fallback backend
 - per-Herdr-session pane state
 - one optional global default input source
 - one global default action: `keep`, `reset`, or `ignore`
@@ -29,19 +29,28 @@ can reuse: `keep`, `reset`, and `ignore`.
 
 ## Dependencies
 
-Install runtime dependencies:
+Install the required Python runtime:
 
 ```sh
 brew install python
+```
+
+Fresh GitHub installs compile and select the bundled Swift helper when Apple's
+command line tools are available. Install `macism` only when using the fallback
+backend:
+
+```sh
 brew tap laishulu/homebrew
 brew install macism
 ```
 
-Python 3.9 or newer is required. Version 1 uses only Python standard-library
+Python 3.9 or newer is required. The plugin uses only Python standard-library
 modules.
 
-`macism` remains the default backend, but this repo also carries a small Swift
-helper backend for input-context refresh testing.
+The base config remains compatible with `macism`, while fresh configs select the
+bundled helper whenever its compiled native executable is available. The helper
+adds input-context refresh for transitions where selecting the system source
+alone is insufficient.
 
 Observed limitation: `macism` v3.1.1 only runs its TemporaryWindow workaround
 when the target source is CJKV. When the plugin switches from WeType pinyin to
@@ -72,7 +81,7 @@ Herdr event/action
               -> dashboard      read-only live/stored record view
               -> herdr          Herdr queries and UI side effects
               -> input_source   current/select backend adapter
-                  -> macism by default
+                  -> bundled helper when available; macism fallback
               -> _files         atomic writes and file locks (internal)
 ```
 
@@ -177,7 +186,7 @@ verified bin/herdr-ime-helper-native -> helper backend
 otherwise                         -> macism backend
 ```
 
-Version 1 allows overriding the backend command in config so users can switch to
+Configuration allows overriding the backend command so users can switch to
 `im-select`, a local Swift helper, or another executable without changing code.
 
 Local Swift helper backend:
@@ -211,9 +220,8 @@ APIs for `current`, `list`, and `select`.
 `--refresh` only creates a tiny temporary AppKit window and waits; it
 intentionally contains no CJKV or policy logic. The Python plugin remains the
 policy owner and may later decide when to add `--refresh` to select calls. The
-actions
-`set-backend-helper` and `set-backend-macism` switch `config.json` between the
-helper and the default `macism` backend.
+actions `set-backend-helper` and `set-backend-macism` switch `config.json`
+between the helper and the canonical `macism` backend configuration.
 
 ## Config
 
@@ -509,9 +517,15 @@ State cleanup rules:
   public pane id and refresh its `workspace_id`, `tab_id`, and other metadata
   from the event payload. If `last_focused_pane_id` points at the old pane id,
   update it to the new pane id.
-- Version 1 does not run list-based pane cleanup and does not call
-  `herdr pane list` during focus handling. Normal cleanup is driven by
-  `pane.closed`, `tab.closed`, `workspace.closed`, and `pane.moved`.
+- Normal cleanup is driven by `pane.closed`, `tab.closed`, `workspace.closed`,
+  and `pane.moved`.
+- Version 0.3 also runs guarded current-session reconciliation at most once per
+  24 hours. A due pass runs only after the foreground pane's input source has
+  been restored, uses a bounded shared deadline, and prunes only pane ids that
+  Herdr confirms absent. Failed, malformed, or ambiguous list/get evidence is
+  retained.
+- `status` and dashboard collection audit live/stored state without mutating it.
+  `doctor --gc-all` can force current-session reconciliation for recovery.
 - Normal events and actions only touch the current Herdr session's state file
   and focus markers.
 - Cross-session leftovers are handled only by explicit maintenance. Normal
@@ -527,7 +541,7 @@ State cleanup rules:
 
 ## Event Model
 
-Version 1 uses Herdr manifest events:
+The plugin uses Herdr manifest events:
 
 ```toml
 [[events]]
@@ -740,7 +754,7 @@ focus paths should not write fallback focus metadata.
 
 ## Performance Guardrails
 
-The hot path is `pane.focused`. Version 1 should avoid work that is not needed
+The hot path is `pane.focused`. It avoids work that is not needed
 to make a focus decision:
 
 - `pane.focused` uses a session-scoped nonblocking `focus.lock`. Losing focus
@@ -768,7 +782,7 @@ to make a focus decision:
 
 ## Actions
 
-Version 1 exposes these actions:
+The plugin exposes these actions:
 
 ```text
 toggle-enabled
@@ -810,7 +824,7 @@ Action behavior:
 - `debug-off`: write `debug = false` to `config.json`.
 - `set-backend-helper`: write the bundled Swift helper backend config to
   `config.json`.
-- `set-backend-macism`: write the default `macism` backend config to
+- `set-backend-macism`: write the canonical `macism` backend config to
   `config.json`.
 - `doctor`: acquire `run.lock`, verify the wrapper, resolved Python, backend
   executor, Herdr env, `HERDR_BIN_PATH`, config dir, state dir, config/state
@@ -1042,7 +1056,7 @@ When debug is enabled, each event/action should log:
 - skip/failure reason
 - cleanup or pane-move details when applicable
 
-Debug logs must avoid unbounded growth. Version 1 writes directly to a
+Debug logs must avoid unbounded growth. The plugin writes directly to a
 timestamped active file such as `debug.20260618T103000123456Z.log`.
 `debug.current` stores the active filename. Version 0.3 uses 10 MiB debug
 segments with three total segments. `focus.log` stays as the active path for
@@ -1168,7 +1182,7 @@ more complex sequence: three-pane memory restore, quick focus changes,
 cleanup. This should be the main repeatable E2E check before changing focus,
 state, lock, or action behavior.
 
-To test the default `macism` backend against real macOS input sources, run:
+To test the `macism` backend against real macOS input sources, run:
 
 ```sh
 input-method-keeper/scripts/herdr_smoke.py --session ime-smoke --link --full-ime
@@ -1206,27 +1220,28 @@ context.
   behavior by observing and restoring the host input source.
 - `pane.focused` does not provide the previous pane or old input source.
 - If the user changes input source in another app and returns to Herdr without a
-  pane focus event, version 1 may not restore immediately.
+  pane focus event, the plugin may not restore immediately.
 - If macOS itself restores a document/app-specific input source before the event
   hook runs, the plugin may attribute that observed input source to the previous
   pane.
 - With `macism` v3.1.1, switching from WeType pinyin to ABC can leave Herdr's
   text input context stale even though `macism` reports ABC. The Swift helper
   backend's `--refresh` path has manually fixed this symptom in Herdr.
-- Version 1 has no rule engine and no ignore list. Use
+- The plugin has no per-workspace, project, agent, or cwd rule engine and no
+  per-pane ignore list. Use
   `default_action = "ignore"` or `enabled = false` to pause the plugin globally,
   or switch `default_action` to `reset` when all panes should use the default
   input source without pane memory.
-- Version 1 relies on pane/tab/workspace lifecycle events for current-session
-  cleanup. A missed event can leave stale pane records because v0.2 does not
-  reconcile stored records against the live pane list.
-- Version 1 does not infer closed Herdr sessions. Stale non-current session
-  directories are removed only by `doctor-gc-all` / `doctor --gc-all` using an
-  age threshold, or by a future Herdr session lifecycle event if one becomes
-  available.
-- A future long-running monitor could improve this by observing macOS input
-  source changes in real time and associating them with the currently focused
-  Herdr pane.
+- Current-session cleanup follows pane/tab/workspace lifecycle events. Version
+  0.3 also reconciles stored records against the live pane list at most once per
+  24 hours. Ambiguous or failed list/get evidence is retained rather than
+  treated as proof that a pane is gone.
+- The plugin does not infer when a whole Herdr session has permanently closed.
+  Stale non-current session directories are removed by `doctor-gc-all` /
+  `doctor --gc-all` using an age threshold.
+- There is intentionally no long-running input-source monitor. Manual source
+  changes are learned at stable Herdr pane-focus transitions rather than in real
+  time while focus remains in one pane.
 
 ## Implemented v0.3
 
