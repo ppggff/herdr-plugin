@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -266,6 +267,29 @@ class V04Test(unittest.TestCase):
         with mock.patch.object(settings.select, "select", return_value=([stream], [], [])):
             self.assertEqual(settings._read_key(stream), "unknown")
 
+    def test_herdr_delayed_arrow_suffix_is_not_mistaken_for_escape(self):
+        from ime_keeper import settings
+
+        stream = io.StringIO("\x1b[C")
+
+        def delayed_ready(_read, _write, _error, timeout):
+            return ([stream], [], []) if timeout >= 0.08 else ([], [], [])
+
+        with mock.patch.object(settings.select, "select", side_effect=delayed_ready):
+            self.assertEqual(settings._read_key(stream), "right")
+
+    def test_buffered_terminal_arrow_sequence_is_read_from_file_descriptor(self):
+        from ime_keeper import settings
+
+        read_fd, write_fd = os.pipe()
+        stream = os.fdopen(read_fd, "r", encoding="utf-8")
+        try:
+            os.write(write_fd, b"\x1b[C")
+            self.assertEqual(settings._read_key(stream), "right")
+        finally:
+            stream.close()
+            os.close(write_fd)
+
     def test_terminal_is_restored_after_unexpected_key_reader_failure(self):
         from ime_keeper import settings
 
@@ -306,6 +330,27 @@ class V04Test(unittest.TestCase):
 
         self.assertTrue(all(len(line) <= 32 for line in rendered.splitlines()))
         self.assertNotIn("\x1b[", rendered)
+
+    def test_narrow_render_wraps_confirmation_effects_and_close_help(self):
+        self.write_config(enabled=True)
+        self.store_with_pane()
+        preview = ime_keeper.MutationService(self.env).apply(
+            "toggle-enabled", backend=FakeBackend(), interactive=True
+        )
+        data = {
+            "config": ime_keeper.load_config(self.config_dir),
+            "backend": {"name": "herdr-ime-helper", "healthy": True},
+            "diagnostics": [],
+        }
+
+        confirmation = ime_keeper.render_settings(
+            data, confirmation=preview.token, width=32
+        )
+        ordinary = ime_keeper.render_settings(data, width=32)
+
+        self.assertIn("clear 1 pane record(s)", " ".join(confirmation.splitlines()))
+        self.assertIn("q/Esc close", " ".join(ordinary.splitlines()))
+        self.assertTrue(all(len(line) <= 32 for line in confirmation.splitlines()))
 
     def test_eof_quits_and_remaining_navigation_keys_are_safe(self):
         self.write_config()

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import io
 import os
 import select
 import shutil
 import signal
 import sys
 import termios
+import time
+import textwrap
 import traceback
 import tty
 from dataclasses import dataclass
@@ -20,6 +23,7 @@ from .mutations import ConfirmationToken, MutationResult, MutationService
 
 
 ROWS = ("Enabled", "Default action", "Default source", "Backend", "Debug logging")
+ESCAPE_SEQUENCE_TIMEOUT_SECONDS = 0.1
 
 
 @dataclass(frozen=True)
@@ -53,6 +57,7 @@ def render_settings(
     width: int = 80,
 ) -> str:
     del color_enabled  # v0.4 keeps the compact surface legible without color semantics.
+    safe_width = max(20, width)
     config = data.get("config") if isinstance(data.get("config"), Mapping) else {}
     identity = data.get("identity")
     backend = data.get("backend") if isinstance(data.get("backend"), Mapping) else {}
@@ -64,7 +69,7 @@ def render_settings(
     values = (
         "on" if config.get("enabled") else "off",
         str(config.get("default_action", "-")),
-        f"{display_source(config.get('default_input_source'))}       current={display_source(data.get('current_input_source'))}",
+        f"{display_source(config.get('default_input_source'))}  current={display_source(data.get('current_input_source'))}",
         "helper" if backend.get("name") == "herdr-ime-helper" else str(backend.get("name") or "-"),
         "on" if config.get("debug") else "off",
     )
@@ -87,22 +92,30 @@ def render_settings(
                 for i, item in enumerate(choice.values)
             ]
             value = "  ".join(options)
-        lines.append(f"{marker} {label:<20}{value}")
-    lines.extend(
-        [
-            "",
-            (
-                f"Pane memory  live={health.get('live', 0)} stored={health.get('stored', len(panes))} "
-                f"unmatched={len(health.get('unmatched_ids', []))} "
-                f"missing={len(health.get('missing_ids', []))} reconcile={reconcile}"
-            ),
-            (
-                f"Logs         focus={_log_summary(logs.get('focus'))} "
-                f"debug={_log_summary(logs.get('debug'))}"
-            ),
-            "",
-        ]
+        lines.append(f"{marker} {label:<16}{value}")
+
+    def append_wrapped(text: str) -> None:
+        lines.extend(
+            textwrap.wrap(
+                text,
+                width=safe_width,
+                break_long_words=False,
+                break_on_hyphens=False,
+            )
+            or [""]
+        )
+
+    lines.append("")
+    append_wrapped(
+        f"Pane memory  live={health.get('live', 0)} stored={health.get('stored', len(panes))} "
+        f"unmatched={len(health.get('unmatched_ids', []))} "
+        f"missing={len(health.get('missing_ids', []))} reconcile={reconcile}"
     )
+    append_wrapped(
+        f"Logs         focus={_log_summary(logs.get('focus'))} "
+        f"debug={_log_summary(logs.get('debug'))}"
+    )
+    lines.append("")
     if confirmation is not None:
         effects = [MutationService.target_effect(confirmation)]
         if confirmation.repair_config:
@@ -113,16 +126,15 @@ def render_settings(
                 if confirmation.state_unknown
                 else f"clear {confirmation.record_count or 0} pane record(s)"
             )
-        lines.append("Confirm: " + "; ".join(effects))
-        lines.append("Enter confirm   Esc cancel")
+        append_wrapped("Confirm: " + "; ".join(effects))
+        append_wrapped("Enter confirm   Esc cancel")
     elif choice:
-        lines.append("Left/Right choose   Enter apply   Esc cancel")
+        append_wrapped("Left/Right choose   Enter apply   Esc cancel")
     else:
-        lines.append("Up/Down or j/k move   Enter change   r refresh   q/Esc close")
+        append_wrapped("Up/Down or j/k move   Enter change   r refresh   q/Esc close")
     if diagnostics:
-        lines.append("Health: " + " | ".join(str(item) for item in diagnostics))
-    lines.append(result_line)
-    safe_width = max(20, width)
+        append_wrapped("Health: " + " | ".join(str(item) for item in diagnostics))
+    append_wrapped(result_line)
     return "\n".join(line[:safe_width] for line in lines)
 
 
@@ -262,7 +274,14 @@ class SettingsController:
 
 
 def _read_key(stream: TextIO) -> str:
-    char = stream.read(1)
+    try:
+        fd: Optional[int] = stream.fileno()
+    except (AttributeError, io.UnsupportedOperation, OSError):
+        fd = None
+    if fd is None:
+        char = stream.read(1)
+    else:
+        char = os.read(fd, 1).decode("utf-8", errors="ignore")
     if char == "":
         return "eof"
     if char in {"\r", "\n"}:
@@ -272,12 +291,34 @@ def _read_key(stream: TextIO) -> str:
     if char != "\x1b":
         return char
     try:
-        readable, _, _ = select.select([stream], [], [], 0.02)
+        readable, _, _ = select.select(
+            [fd if fd is not None else stream],
+            [],
+            [],
+            ESCAPE_SEQUENCE_TIMEOUT_SECONDS,
+        )
     except (TypeError, ValueError, OSError):
         readable = []
     if not readable:
         return "escape"
-    suffix = stream.read(2)
+    if fd is None:
+        suffix = stream.read(2)
+    else:
+        chunks = []
+        remaining = 2
+        deadline = time.monotonic() + ESCAPE_SEQUENCE_TIMEOUT_SECONDS
+        while remaining:
+            chunk = os.read(fd, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+            if remaining:
+                wait = max(0.0, deadline - time.monotonic())
+                readable, _, _ = select.select([fd], [], [], wait)
+                if not readable:
+                    break
+        suffix = b"".join(chunks).decode("utf-8", errors="ignore")
     return {"[A": "up", "[B": "down", "[C": "right", "[D": "left"}.get(suffix, "unknown")
 
 

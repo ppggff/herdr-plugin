@@ -473,12 +473,11 @@ def pane_shell_capture(
     herdr(["pane", "run", pane_id, wrapped], session=session, echo=False)
     wait_command = herdr(
         [
-            "wait",
-            "output",
+            "pane",
+            "wait-output",
             pane_id,
-            "--match",
-            f"^{token}:[0-9]+$",
             "--regex",
+            f"^{token}:[0-9]+$",
             "--timeout",
             str(timeout_ms),
         ],

@@ -34,7 +34,7 @@ class PaneShellCaptureTests(unittest.TestCase):
             if args[:2] == ["pane", "run"]:
                 output_path.write_text("captured\n", encoding="utf-8")
                 return herdr_smoke.Command(list(args), "", "", 0)
-            if args[:2] == ["wait", "output"]:
+            if args[:2] == ["pane", "wait-output"]:
                 return herdr_smoke.Command(
                     list(args),
                     json.dumps({"result": {"matched_line": f"{token}:0"}}),
@@ -52,6 +52,18 @@ class PaneShellCaptureTests(unittest.TestCase):
 
             self.assertEqual(result.stdout, "captured\n")
             self.assertEqual(result.returncode, 0)
+            self.assertEqual(
+                calls[1][0],
+                [
+                    "pane",
+                    "wait-output",
+                    "w1:p1",
+                    "--regex",
+                    f"^{token}:[0-9]+$",
+                    "--timeout",
+                    "5000",
+                ],
+            )
             self.assertEqual([echo for _, echo in calls], [False, False])
         finally:
             herdr_smoke.os.getpid = original_getpid
