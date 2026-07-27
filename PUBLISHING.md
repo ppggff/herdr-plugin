@@ -21,7 +21,7 @@ The current manifest already declares the fields Herdr requires:
 
 - `id = "ppggff.input-method-keeper"`
 - `name = "Input Method Keeper"`
-- `version = "0.3.0"`
+- `version = "0.4.0"`
 - `min_herdr_version = "0.7.4"`
 - `platforms = ["macos"]`
 - a macOS build preflight that verifies Python and prepares a usable backend

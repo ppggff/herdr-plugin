@@ -71,7 +71,7 @@ Install the current release with Herdr's GitHub shorthand:
 
 ```sh
 herdr plugin install ppggff/herdr-plugin/input-method-keeper \
-  --ref v0.3.0 --yes
+  --ref v0.4.0 --yes
 ```
 
 The install preview includes `bin/prepare-install`. Herdr runs it before

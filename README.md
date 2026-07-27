@@ -16,20 +16,17 @@ Install the current release:
 
 ```sh
 herdr plugin install ppggff/herdr-plugin/input-method-keeper \
-  --ref v0.3.0 --yes
+  --ref v0.4.0 --yes
 ```
 
 See [input-method-keeper/README.md](input-method-keeper/README.md) for install,
 upgrade, quick start, configuration, testing, and troubleshooting.
 
-Version 0.3 makes the plugin quiet, fast, and self-maintaining without adding a
-rule engine or daemon. See the [v0.3 design and release evidence](input-method-keeper/V0.3.md).
-
 Version 0.4 adds a compact keyboard-driven settings popup backed by the same
 mutation semantics as the existing actions. See the
-[v0.4 design](input-method-keeper/V0.4.md).
+[v0.4 design and release evidence](input-method-keeper/V0.4.md).
 
-See the [v0.3.0 release](https://github.com/ppggff/herdr-plugin/releases/tag/v0.3.0)
+See the [v0.4.0 release](https://github.com/ppggff/herdr-plugin/releases/tag/v0.4.0)
 for highlights and validation details.
 
 For the GitHub publishing and post-release verification checklist, see
